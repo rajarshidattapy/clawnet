@@ -773,6 +773,43 @@ def _execute_tg_action(state: "ClawState", action) -> None:
     execute_action(action.action_type, action.pid, action.remote_ip, state)
 
 
+def _openclaw_alert_key(ai) -> tuple:
+    return (
+        "openclaw",
+        getattr(ai, "level", ""),
+        getattr(ai, "process", ""),
+        getattr(ai, "remote", ""),
+        getattr(ai, "pid", None),
+        getattr(ai, "reason", ""),
+    )
+
+
+def _send_openclaw_alert(tg, level: str, process: str, pid, remote: str,
+                         rport="", geo: str = "", reason: str = "",
+                         action: str = "monitor") -> None:
+    if hasattr(tg, "send_openclaw_alert"):
+        tg.send_openclaw_alert(
+            level=level,
+            process=process,
+            pid=pid,
+            remote=remote,
+            rport=rport,
+            geo=geo,
+            reason=reason,
+            action=action,
+        )
+        return
+    icon = "🔴" if level == "CRITICAL" else "🟡"
+    tg.send_alert(
+        f"{icon} <b>ClawNet Alert: {level}</b>\n"
+        f"Process: <code>{process}</code>  PID: <code>{pid}</code>\n"
+        f"IP: <code>{remote}:{rport}</code>  ({geo})\n"
+        f"Reason: {reason}\n"
+        f"Suggested: <b>{action}</b>\n"
+        f"Time: {datetime.now().strftime('%H:%M:%S')}"
+    )
+
+
 def _maybe_telegram_alert(state: "ClawState", connections: list, oc, tg) -> None:
     if tg is None or not getattr(tg, "ready", False):
         return
@@ -810,20 +847,43 @@ def _maybe_telegram_alert(state: "ClawState", connections: list, oc, tg) -> None
             alert_reason = f"Process running from suspicious path with foreign connection"
 
         if should_alert:
+            ai_key = _openclaw_alert_key(ai) if (ai and not ai.pending) else None
             with state.lock:
+                if ck in state.alerted_keys or (ai_key and ai_key in state.alerted_keys):
+                    continue
                 state.alerted_keys.add(ck)
+                if ai_key:
+                    state.alerted_keys.add(ai_key)
             rport = conn.raddr.port if conn.raddr else "—"
             geo   = _geo_cache.get(rip, "?") if rip else "—"
-            icon  = "🔴" if alert_level == "CRITICAL" else "🟡"
             action_text = (ai.action if (ai and not ai.pending) else "monitor")
-            tg.send_alert(
-                f"{icon} <b>ClawNet Alert: {alert_level}</b>\n"
-                f"Process: <code>{proc_name}</code>  PID: <code>{conn.pid}</code>\n"
-                f"IP: <code>{rip}:{rport}</code>  ({geo})\n"
-                f"Reason: {alert_reason}\n"
-                f"Suggested: <b>{action_text}</b>\n"
-                f"Time: {datetime.now().strftime('%H:%M:%S')}"
+            _send_openclaw_alert(
+                tg, alert_level, proc_name, conn.pid, rip, rport, geo,
+                alert_reason, action_text,
             )
+    if oc is None or not getattr(oc, "available", False):
+        return
+    for ai in oc.all_analyses():
+        if ai.pending or ai.level not in ("CRITICAL", "SUSPICIOUS"):
+            continue
+        ai_key = _openclaw_alert_key(ai)
+        with state.lock:
+            if ai_key in state.alerted_keys:
+                continue
+            state.alerted_keys.add(ai_key)
+        remote = getattr(ai, "remote", "") or ""
+        geo = _geo_cache.get(remote, "?") if remote else "—"
+        _send_openclaw_alert(
+            tg,
+            ai.level,
+            ai.process,
+            ai.pid,
+            remote,
+            "",
+            geo,
+            ai.reason,
+            ai.action,
+        )
 
 
 def _maybe_auto_respond(connections: list, oc, auto: bool, tg, state: "ClawState") -> None:

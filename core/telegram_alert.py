@@ -1,18 +1,20 @@
-"""Telegram alert and remote-command bot for ClawNet v2/v3."""
-import asyncio
+"""Telegram alert via HTTP API only - no external dependencies."""
 import os
+import json
 import random
-import threading
 import time
+import threading
+from html import escape as _html_escape
 from dataclasses import dataclass
-from typing import Callable, Optional
+from typing import Optional
 
 try:
-    from telegram import Bot, Update
-    from telegram.ext import Application, CommandHandler, ContextTypes
-    _HAS_PTB = True
+    import urllib.request
+    import urllib.parse
+    import urllib.error
+    _HAS_URLLIB = True
 except ImportError:
-    _HAS_PTB = False
+    _HAS_URLLIB = False
 
 
 @dataclass
@@ -27,192 +29,325 @@ class PendingAction:
 
 
 class TelegramAlert:
-    """Sends threat alerts and handles remote approval commands via Telegram."""
+    """Send threat alerts via Telegram HTTP API (no external dependencies)."""
 
-    def __init__(self, token: str, chat_id: str = "") -> None:
-        self._token    = token.strip()
-        self._chat_id  = chat_id.strip()
-        self._pending: dict[str, PendingAction] = {}
-        self._lock     = threading.Lock()
-        self._execute_cb: Optional[Callable[[PendingAction], None]] = None
-        self._loop: Optional[asyncio.AbstractEventLoop] = None
-        self._app      = None
-        self._status   = "initializing…"
-
-        self.available = _HAS_PTB and bool(self._token)
-        self.ready     = self.available and bool(self._chat_id)
-
-        if self.available:
-            threading.Thread(target=self._run_thread, daemon=True, name="tg-bot").start()
-
-    # ── public API ────────────────────────────────────────────────────────────
+    def __init__(
+        self, 
+        token: str, 
+        chat_id: str = "",
+        backend_url: str = "",
+        message_handler = None,
+    ) -> None:
+        self._token = token.strip()
+        self._chat_id = chat_id.strip()
+        self._base_url = f"https://api.telegram.org/bot{self._token}" if self._token else ""
+        self._backend_url = backend_url.strip()
+        self._message_handler = message_handler  # Callback(user_id, username, message) -> reply
+        self._status = "initializing"
+        self._update_offset = 0
+        self._polling = False
+        
+        self.available = _HAS_URLLIB and bool(self._token)
+        self.ready = self.available and bool(self._chat_id)
+        
+        if not self.ready and self.available:
+            self._status = "warning: TELEGRAM_CHAT_ID not configured"
+        elif self.ready:
+            self._status = "ready"
 
     @property
     def status(self) -> str:
-        with self._lock:
-            return self._status
+        """Current status of the bot."""
+        return self._status
 
-    def set_execute_callback(self, cb: Callable[[PendingAction], None]) -> None:
-        self._execute_cb = cb
+    def set_execute_callback(self, callback) -> None:
+        """Stub for compatibility with old API (HTTP-only doesn't support callbacks)."""
+        pass
 
-    def send_alert(self, text: str) -> None:
-        if not self.ready or not self._loop:
-            return
-        asyncio.run_coroutine_threadsafe(self._do_send(text), self._loop)
-
-    def add_pending(self, action: PendingAction) -> None:
-        with self._lock:
-            self._pending[action.action_id] = action
-        icon = "🔴" if "kill" in action.action_type else "🟡"
-        self.send_alert(
-            f"{icon} <b>Action Required — ClawNet</b>\n"
-            f"Process: <code>{action.process}</code>  PID: <code>{action.pid}</code>\n"
-            f"Remote IP: <code>{action.remote_ip}</code>\n"
-            f"Proposed: <b>{action.action_type}</b>\n"
-            f"Reason: {action.reason}\n\n"
-            f"✅ /approve {action.action_id}\n"
-            f"❌ /deny {action.action_id}"
-        )
+    def add_pending(self, action: "PendingAction") -> None:
+        """Stub for compatibility with old API (HTTP-only doesn't support pending actions)."""
+        pass
 
     def get_pending_count(self) -> int:
-        with self._lock:
-            return len(self._pending)
+        """Stub for compatibility with old API (HTTP-only doesn't track pending actions)."""
+        return 0
 
-    # ── threading / asyncio ───────────────────────────────────────────────────
+    def set_message_handler(self, handler) -> None:
+        """Set a callback to handle incoming messages.
+        
+        Handler signature: handler(user_id, username, message) -> reply_text
+        """
+        self._message_handler = handler
 
-    def _run_thread(self) -> None:
-        self._loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(self._loop)
-        self._loop.run_until_complete(self._bot_main())
+    def start_polling(self, poll_interval: int = 2) -> None:
+        """Start background thread to poll for incoming messages."""
+        if self._polling:
+            return
+        self._polling = True
+        threading.Thread(
+            target=self._poll_messages,
+            args=(poll_interval,),
+            daemon=True,
+            name="tg-polling"
+        ).start()
 
-    async def _bot_main(self) -> None:
+    def stop_polling(self) -> None:
+        """Stop message polling."""
+        self._polling = False
+
+    def _poll_messages(self, poll_interval: int) -> None:
+        """Background thread: poll for messages and process them."""
+        while self._polling:
+            try:
+                updates = self.get_updates(offset=self._update_offset)
+                for update in updates:
+                    self._process_update(update)
+                    self._update_offset = update.get("update_id", 0) + 1
+                
+                if not updates:
+                    time.sleep(poll_interval)
+            except Exception:
+                time.sleep(poll_interval)
+
+    def _process_update(self, update: dict) -> None:
+        """Process a single update from Telegram."""
+        message = update.get("message")
+        if not message:
+            return
+        
+        user_id = message.get("from", {}).get("id")
+        username = message.get("from", {}).get("username", "unknown")
+        text = message.get("text", "")
+        message_id = message.get("message_id")
+        
+        if not text or not user_id:
+            return
+        
         try:
-            self._app = Application.builder().token(self._token).build()
-            for name, handler in [
-                ("start",   self._cmd_start),
-                ("approve", self._cmd_approve),
-                ("deny",    self._cmd_deny),
-                ("kill",    self._cmd_kill),
-                ("block",   self._cmd_block),
-                ("status",  self._cmd_status),
-            ]:
-                self._app.add_handler(CommandHandler(name, handler))
-            await self._app.initialize()
-            await self._app.start()
-            await self._app.updater.start_polling(drop_pending_updates=True)
-            with self._lock:
-                self._status = "connected"
-            await asyncio.Event().wait()
-        except Exception as exc:
-            with self._lock:
-                self._status = f"error: {str(exc)[:60]}"
+            # Try to send to backend if configured
+            if self._backend_url:
+                reply = self._forward_to_backend(user_id, username, text)
+            elif self._message_handler:
+                reply = self._message_handler(user_id, username, text)
+            else:
+                reply = "Message received (no handler configured)"
+            
+            # Send reply back to user
+            if reply and message_id:
+                self.send_reply(message_id, reply)
+        
+        except Exception:
+            pass
 
-    async def _do_send(self, text: str) -> None:
+    def _forward_to_backend(self, user_id: int, username: str, message: str) -> str:
+        """Forward message to backend API and get reply.
+        
+        Args:
+            user_id: Telegram user ID
+            username: Telegram username
+            message: Message text
+            
+        Returns:
+            Reply text from backend
+        """
         try:
-            await self._app.bot.send_message(
-                chat_id=self._chat_id, text=text, parse_mode="HTML"
+            payload = {
+                "user_id": str(user_id),
+                "username": username,
+                "message": message
+            }
+            
+            data = json.dumps(payload).encode('utf-8')
+            req = urllib.request.Request(
+                self._backend_url,
+                data=data,
+                headers={"Content-Type": "application/json"}
             )
-        except Exception as exc:
-            with self._lock:
-                self._status = f"send-error: {str(exc)[:50]}"
+            
+            with urllib.request.urlopen(req, timeout=30) as response:
+                result = json.loads(response.read().decode('utf-8'))
+                return result.get("reply", "No response from backend")
+        
+        except urllib.error.HTTPError as e:
+            return f"Backend error: {e.code}"
+        except Exception as e:
+            return f"Connection failed: {str(e)[:100]}"
 
-    # ── command handlers ──────────────────────────────────────────────────────
+    def send_alert(self, text: str) -> bool:
+        """Send alert message via HTTP API.
+        
+        Args:
+            text: HTML-formatted message text
+            
+        Returns:
+            True if sent successfully, False otherwise
+        """
+        if not self.ready:
+            return False
+        
+        return self._send_message(text)
 
-    async def _cmd_start(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-        cid = str(update.effective_chat.id)
-        if not self._chat_id:
-            self._chat_id = cid
-            self.ready    = True
-            _persist_chat_id(cid)
-            with self._lock:
-                self._status = "connected"
-        await update.message.reply_html(
-            f"🐾 <b>ClawNet v2 Active</b>\n"
-            f"Chat ID: <code>{cid}</code>\n\n"
-            "/status — pending approvals\n"
-            "/approve &lt;id&gt; — approve action\n"
-            "/deny &lt;id&gt; — deny action\n"
-            "/kill &lt;pid&gt; — kill process now\n"
-            "/block &lt;ip&gt; — block IP now"
+    def send_clawnet_alert(
+        self,
+        level: str,
+        process: str,
+        pid: Optional[int] = None,
+        remote: str = "",
+        rport: object = "",
+        geo: str = "",
+        reason: str = "",
+        action: str = "monitor",
+    ) -> bool:
+        """Send a formatted ClawNet intelligence alert."""
+        normalized_level = (level or "").strip().upper()
+        icon = "CRITICAL" if normalized_level == "CRITICAL" else "SUSPICIOUS"
+        proc_text = _html_escape(process or "unknown")
+        pid_text = _html_escape(str(pid if pid is not None else "-"))
+        reason_text = _html_escape(reason or "ClawNet flagged this activity")
+        action_text = _html_escape(action or "monitor")
+        geo_text = _html_escape(geo or "-")
+
+        remote_text = "-"
+        if remote:
+            remote_text = str(remote)
+            if rport not in ("", None, "-"):
+                remote_text = f"{remote_text}:{rport}"
+        remote_text = _html_escape(remote_text)
+
+        return self.send_alert(
+            f"<b>ClawNet Intelligence: {icon}</b>\n"
+            f"Process: <code>{proc_text}</code>  PID: <code>{pid_text}</code>\n"
+            f"Remote: <code>{remote_text}</code>  ({geo_text})\n"
+            f"Reason: {reason_text}\n"
+            f"Suggested: <b>{action_text}</b>\n"
+            f"Time: {time.strftime('%H:%M:%S')}"
         )
 
-    async def _cmd_approve(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-        args = ctx.args
-        if not args:
-            await update.message.reply_text("Usage: /approve <action_id>")
-            return
-        aid = args[0]
-        with self._lock:
-            action = self._pending.pop(aid, None)
-        if not action:
-            await update.message.reply_text(f"No pending action: {aid}")
-            return
-        action.approved = True
-        if self._execute_cb:
-            threading.Thread(target=self._execute_cb, args=(action,), daemon=True).start()
-        await update.message.reply_text(
-            f"✅ Approved: {action.action_type}\n"
-            f"Process: {action.process} (PID {action.pid})"
-        )
+    def _send_message(self, text: str) -> bool:
+        """Send message via Telegram HTTP API with retry."""
+        if not self._base_url or not self._chat_id:
+            self._status = "error: not-configured"
+            return False
+        
+        url = f"{self._base_url}/sendMessage"
+        payload = {
+            "chat_id": self._chat_id,
+            "text": text,
+            "parse_mode": "HTML"
+        }
+        
+        # Retry up to 3 times for transient failures
+        for attempt in range(3):
+            try:
+                data = urllib.parse.urlencode(payload).encode('utf-8')
+                req = urllib.request.Request(url, data=data)
+                req.add_header('Content-Type', 'application/x-www-form-urlencoded')
+                
+                with urllib.request.urlopen(req, timeout=10) as response:
+                    if response.status == 200:
+                        self._status = "ready"
+                        return True
+                    else:
+                        self._status = f"http-error: {response.status}"
+                        return False
+            
+            except urllib.error.HTTPError as e:
+                error_code = e.code
+                
+                # Permanent errors - don't retry
+                if error_code in (400, 401, 404):
+                    self._status = f"error: bad-config-{error_code}"
+                    return False
+                
+                # Transient errors - retry
+                if attempt < 2:
+                    time.sleep(0.5 * (attempt + 1))  # 0.5s, 1s backoff
+                    continue
+                
+                self._status = f"http-error: {error_code}"
+                return False
+            
+            except (urllib.error.URLError, TimeoutError) as e:
+                # Network error - retry
+                if attempt < 2:
+                    time.sleep(0.5 * (attempt + 1))
+                    continue
+                self._status = f"network-error"
+                return False
+            
+            except Exception as e:
+                self._status = f"error: {str(e)[:50]}"
+                return False
+        
+        return False
 
-    async def _cmd_deny(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-        args = ctx.args
-        if not args:
-            await update.message.reply_text("Usage: /deny <action_id>")
-            return
-        aid = args[0]
-        with self._lock:
-            removed = self._pending.pop(aid, None)
-        msg = (
-            f"❌ Denied: {removed.action_type} on {removed.process}"
-            if removed else f"Not found: {aid}"
-        )
-        await update.message.reply_text(msg)
-
-    async def _cmd_kill(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-        args = ctx.args
-        if not args:
-            await update.message.reply_text("Usage: /kill <pid>")
-            return
+    def get_updates(self, offset: int = 0) -> list:
+        """Fetch pending updates via HTTP API (polling).
+        
+        Args:
+            offset: Update offset for polling
+            
+        Returns:
+            List of update objects or empty list
+        """
+        if not self.available or not self._base_url:
+            return []
+        
         try:
-            pid = int(args[0])
-        except ValueError:
-            await update.message.reply_text("PID must be a number")
-            return
-        action = PendingAction(
-            action_id=f"tg-kill-{pid}", pid=pid, remote_ip="",
-            process=f"pid:{pid}", action_type="kill_process",
-            reason="Direct kill via Telegram",
-        )
-        if self._execute_cb:
-            threading.Thread(target=self._execute_cb, args=(action,), daemon=True).start()
-        await update.message.reply_text(f"⚡ Kill signal sent to PID {pid}")
+            url = f"{self._base_url}/getUpdates"
+            payload = {
+                "offset": offset,
+                "timeout": 5,
+                "allowed_updates": ["message"]
+            }
+            
+            data = urllib.parse.urlencode(payload).encode('utf-8')
+            req = urllib.request.Request(url, data=data)
+            req.add_header('Content-Type', 'application/x-www-form-urlencoded')
+            
+            with urllib.request.urlopen(req, timeout=15) as response:
+                result = json.loads(response.read().decode('utf-8'))
+                
+                if result.get("ok"):
+                    return result.get("result", [])
+                else:
+                    self._status = f"api-error"
+                    return []
+        
+        except Exception:
+            return []
 
-    async def _cmd_block(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-        args = ctx.args
-        if not args:
-            await update.message.reply_text("Usage: /block <ip>")
-            return
-        ip = args[0]
-        action = PendingAction(
-            action_id=f"tg-block-{ip.replace('.', '-')}",
-            pid=None, remote_ip=ip, process="",
-            action_type="block_ip", reason="Manual block via Telegram",
-        )
-        if self._execute_cb:
-            threading.Thread(target=self._execute_cb, args=(action,), daemon=True).start()
-        await update.message.reply_text(f"🚫 Blocking {ip}…")
-
-    async def _cmd_status(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-        with self._lock:
-            pending = list(self._pending.values())
-        if not pending:
-            await update.message.reply_text("✅ No pending actions.")
-            return
-        lines = ["⏳ <b>Pending Actions:</b>"]
-        for p in pending:
-            lines.append(f"• <code>{p.action_id}</code> — {p.action_type} → {p.process}")
-        await update.message.reply_html("\n".join(lines))
+    def send_reply(self, message_id: int, text: str) -> bool:
+        """Send a reply to a message.
+        
+        Args:
+            message_id: Message ID to reply to
+            text: HTML-formatted response text
+            
+        Returns:
+            True if sent, False otherwise
+        """
+        if not self.ready or not self._base_url:
+            return False
+        
+        try:
+            url = f"{self._base_url}/sendMessage"
+            payload = {
+                "chat_id": self._chat_id,
+                "text": text,
+                "parse_mode": "HTML",
+                "reply_to_message_id": message_id
+            }
+            
+            data = urllib.parse.urlencode(payload).encode('utf-8')
+            req = urllib.request.Request(url, data=data)
+            req.add_header('Content-Type', 'application/x-www-form-urlencoded')
+            
+            with urllib.request.urlopen(req, timeout=10) as response:
+                return response.status == 200
+        
+        except Exception:
+            return False
 
 
 # ── Telegram mock scheduler ───────────────────────────────────────────────────
@@ -245,6 +380,7 @@ _SEVERITY_WEIGHTS = [("LOW", 70), ("MED", 20), ("HIGH", 10)]
 
 
 def _weighted_pick() -> tuple[str, str]:
+    """Pick a weighted random severity and message."""
     pool = [sev for sev, w in _SEVERITY_WEIGHTS for _ in range(w)]
     sev  = random.choice(pool)
     msg  = random.choice(_MOCK_MESSAGES[sev])
@@ -266,15 +402,18 @@ class TelegramMock:
         self._running = False
 
     def start(self) -> None:
+        """Start mock update scheduler."""
         if self._running:
             return
         self._running = True
         threading.Thread(target=self._loop, daemon=True, name="tg-mock").start()
 
     def stop(self) -> None:
+        """Stop mock update scheduler."""
         self._running = False
 
     def _loop(self) -> None:
+        """Main mock update loop."""
         while self._running:
             delay = random.randint(self._min, self._max)
             time.sleep(delay)
@@ -289,6 +428,7 @@ class TelegramMock:
 
 
 def _persist_chat_id(chat_id: str) -> None:
+    """Update TELEGRAM_CHAT_ID in .env file."""
     env_path = os.path.join(os.path.dirname(__file__), "..", ".env")
     try:
         with open(env_path, "r") as f:
