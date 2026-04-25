@@ -1,4 +1,3 @@
-````md
 # ClawNet
 
 ClawNet is an AI-powered terminal security monitoring tool enhanced with OpenClaw intelligence for real-time threat analysis, contextual risk scoring, and autonomous response.

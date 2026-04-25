@@ -1,9 +1,0 @@
-{
-  "permissions": {
-    "allow": [
-      "Bash(python -m py_compile core/openclaw.py)",
-      "Bash(python -m py_compile core/clawnet.py)",
-      "Bash(python -m py_compile clawnet.py)"
-    ]
-  }
-}

@@ -1,4 +1,4 @@
-"""OpenClaw — AI intelligence engine for ClawNet. Powered by Claude."""
+"""OpenClaw — AI intelligence engine for ClawNet. Powered by GPT-4o-mini."""
 import json
 import os
 import queue
@@ -7,10 +7,12 @@ from dataclasses import dataclass
 from typing import Optional
 
 try:
-    import anthropic as _anthropic
-    _HAS_ANTHROPIC = True
+    import openai as _openai
+    _HAS_OPENAI = True
 except ImportError:
-    _HAS_ANTHROPIC = False
+    _HAS_OPENAI = False
+
+_MODEL = "gpt-4o-mini"
 
 _SYSTEM_ANALYZE = """\
 You are OpenClaw, an embedded AI security analyst in ClawNet (Windows network monitor).
@@ -44,13 +46,13 @@ class Analysis:
 
 class OpenClaw:
     def __init__(self) -> None:
-        key = os.environ.get("ANTHROPIC_API_KEY", "")
-        self._ok     = _HAS_ANTHROPIC and bool(key)
+        key = os.environ.get("OPENAI_API_KEY", "")
+        self._ok   = _HAS_OPENAI and bool(key)
         self._cache: dict[tuple, Analysis] = {}
-        self._lock   = threading.Lock()
+        self._lock  = threading.Lock()
         self._q: queue.Queue = queue.Queue(maxsize=30)
         if self._ok:
-            self._client = _anthropic.Anthropic(api_key=key)
+            self._client = _openai.OpenAI(api_key=key)
             threading.Thread(target=self._worker, daemon=True).start()
 
     @property
@@ -92,14 +94,16 @@ class OpenClaw:
 
     def copilot(self, question: str, context: str) -> str:
         if not self._ok:
-            return "OpenClaw unavailable — set ANTHROPIC_API_KEY to enable AI features."
-        msg = self._client.messages.create(
-            model="claude-haiku-4-5-20251001",
+            return "OpenClaw unavailable — set OPENAI_API_KEY to enable AI features."
+        r = self._client.chat.completions.create(
+            model=_MODEL,
             max_tokens=600,
-            system=_SYSTEM_COPILOT,
-            messages=[{"role": "user", "content": f"Network context:\n{context}\n\nQuestion: {question}"}],
+            messages=[
+                {"role": "system", "content": _SYSTEM_COPILOT},
+                {"role": "user",   "content": f"Network context:\n{context}\n\nQuestion: {question}"},
+            ],
         )
-        return msg.content[0].text.strip()
+        return r.choices[0].message.content.strip()
 
     # ── internals ─────────────────────────────────────────────────────────────
 
@@ -126,13 +130,15 @@ class OpenClaw:
             f"Country: {info.get('country', '?')} | Suspicious path: {info.get('suspicious')}\n"
             f"Heuristic risk: {info.get('risk')}"
         )
-        r = self._client.messages.create(
-            model="claude-haiku-4-5-20251001",
+        r = self._client.chat.completions.create(
+            model=_MODEL,
             max_tokens=150,
-            system=_SYSTEM_ANALYZE,
-            messages=[{"role": "user", "content": prompt}],
+            messages=[
+                {"role": "system", "content": _SYSTEM_ANALYZE},
+                {"role": "user",   "content": prompt},
+            ],
         )
-        text = r.content[0].text.strip()
+        text = r.choices[0].message.content.strip()
         s, e = text.find("{"), text.rfind("}") + 1
         if s >= 0 and e > s:
             d = json.loads(text[s:e])

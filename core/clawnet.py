@@ -13,13 +13,20 @@ import sys
 import threading
 import time
 import urllib.request
+
+# Force UTF-8 output on Windows so Unicode chars render correctly
+if sys.platform == "win32":
+    try:
+        ctypes.windll.kernel32.SetConsoleOutputCP(65001)
+    except Exception:
+        pass
 from datetime import datetime
 from typing import NamedTuple, Optional
 
 try:
     import psutil
 except ImportError:
-    print("Missing dependency: pip install psutil rich anthropic")
+    print("Missing dependency: pip install psutil rich openai")
     sys.exit(1)
 
 try:
@@ -33,7 +40,7 @@ try:
     from rich.table import Table
     from rich.text import Text
 except ImportError:
-    print("Missing dependency: pip install psutil rich anthropic")
+    print("Missing dependency: pip install psutil rich openai")
     sys.exit(1)
 
 # OpenClaw must be importable whether invoked as a module or directly
@@ -620,12 +627,12 @@ def build_openclaw_panel(openclaw) -> Panel:
     title = "[bold bright_red]⚡ OPENCLAW INTELLIGENCE[/]"
 
     if openclaw is None or not openclaw.available:
-        missing_lib  = "[red]anthropic[/] not installed" if OpenClaw is None else ""
-        missing_key  = "" if (os.environ.get("ANTHROPIC_API_KEY")) else "[yellow]ANTHROPIC_API_KEY[/] not set"
+        missing_lib  = "[red]openai[/] not installed" if OpenClaw is None else ""
+        missing_key  = "" if (os.environ.get("OPENAI_API_KEY")) else "[yellow]OPENAI_API_KEY[/] not set"
         reason = missing_lib or missing_key or "unavailable"
         body = (
             f"[dim]AI analysis disabled — {reason}.[/]\n"
-            "[dim]Set ANTHROPIC_API_KEY to enable OpenClaw threat intelligence.[/]"
+            "[dim]Set OPENAI_API_KEY to enable OpenClaw threat intelligence.[/]"
         )
         return Panel(body, title=title, border_style="bright_black")
 
@@ -754,7 +761,7 @@ def run_monitor(resolve: bool = False, auto: bool = False) -> None:
     console.print(Panel(
         Align.center(Text(BANNER, style="bold bright_cyan")),
         border_style="bright_cyan",
-        subtitle="[dim]ClawNet  |  NetWatch + OpenClaw  |  Ctrl+C to stop[/]",
+        subtitle="[dim]ClawNet  |  Ctrl+C to stop[/]",
         padding=(0, 0),
     ))
 
@@ -805,8 +812,8 @@ def run_copilot() -> None:
     if oc is None or not oc.available:
         console.print(Panel(
             "[yellow]OpenClaw unavailable.[/]\n"
-            "Install anthropic: [bold]pip install anthropic[/bold]\n"
-            "Set your key:      [bold]set ANTHROPIC_API_KEY=sk-ant-...[/bold]",
+            "Install openai:  [bold]pip install openai[/bold]\n"
+            "Set your key:    [bold]set OPENAI_API_KEY=sk-...[/bold]",
             border_style="yellow",
         ))
         return
