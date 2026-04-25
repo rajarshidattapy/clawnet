@@ -1,4 +1,8 @@
-# ClawNet
+<h1 align="center">ClawNet</h1>
+
+<p align="center">
+  <img width="920" height="171" alt="ClawNet" src="https://github.com/user-attachments/assets/62e1cdf7-c5de-4e5e-8d59-3cabaadc676c" />
+</p>
 
 ClawNet is an AI-powered terminal security monitoring tool enhanced with OpenClaw intelligence for real-time threat analysis, contextual risk scoring, and autonomous response.
 
