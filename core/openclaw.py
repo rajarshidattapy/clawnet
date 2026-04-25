@@ -45,12 +45,13 @@ class Analysis:
 
 
 class OpenClaw:
-    def __init__(self) -> None:
+    def __init__(self, memory=None) -> None:
         key = os.environ.get("OPENAI_API_KEY", "")
-        self._ok   = _HAS_OPENAI and bool(key)
+        self._ok     = _HAS_OPENAI and bool(key)
         self._cache: dict[tuple, Analysis] = {}
-        self._lock  = threading.Lock()
+        self._lock   = threading.Lock()
         self._q: queue.Queue = queue.Queue(maxsize=30)
+        self._memory = memory
         if self._ok:
             self._client = _openai.OpenAI(api_key=key)
             threading.Thread(target=self._worker, daemon=True).start()
@@ -123,6 +124,13 @@ class OpenClaw:
                 self._cache[key] = result
 
     def _call(self, info: dict) -> Analysis:
+        mem_ctx = ""
+        if self._memory:
+            mem_ctx = self._memory.build_context(
+                ip=info.get("remote", ""),
+                process=info.get("process", ""),
+                port=info.get("rport", 0),
+            )
         prompt = (
             f"Process: {info.get('process')} | Path: {info.get('exe', 'unknown')}\n"
             f"Proto: {info.get('proto')} | Status: {info.get('status')}\n"
@@ -130,6 +138,8 @@ class OpenClaw:
             f"Country: {info.get('country', '?')} | Suspicious path: {info.get('suspicious')}\n"
             f"Heuristic risk: {info.get('risk')}"
         )
+        if mem_ctx:
+            prompt = mem_ctx + "\n" + prompt
         r = self._client.chat.completions.create(
             model=_MODEL,
             max_tokens=150,
@@ -142,7 +152,7 @@ class OpenClaw:
         s, e = text.find("{"), text.rfind("}") + 1
         if s >= 0 and e > s:
             d = json.loads(text[s:e])
-            return Analysis(
+            result = Analysis(
                 level=d.get("level", "?"),
                 reason=d.get("reason", ""),
                 action=d.get("action", "none"),
@@ -150,9 +160,25 @@ class OpenClaw:
                 remote=info.get("remote", ""),
                 pid=info.get("pid"),
             )
-        return Analysis(
-            level="?", reason=text[:80], action="none",
-            process=info.get("process", "?"),
-            remote=info.get("remote", ""),
-            pid=info.get("pid"),
-        )
+        else:
+            result = Analysis(
+                level="?", reason=text[:80], action="none",
+                process=info.get("process", "?"),
+                remote=info.get("remote", ""),
+                pid=info.get("pid"),
+            )
+        if self._memory and result.level in ("SUSPICIOUS", "CRITICAL"):
+            try:
+                from memory import make_event as _make_event
+            except ImportError:
+                from core.memory import make_event as _make_event
+            self._memory.store_event(_make_event(
+                level=result.level,
+                reason=result.reason,
+                action=result.action,
+                process=info.get("process", "?"),
+                remote_ip=info.get("remote", ""),
+                port=info.get("rport", 0),
+                exe=info.get("exe", ""),
+            ))
+        return result
