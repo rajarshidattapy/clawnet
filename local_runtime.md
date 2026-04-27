@@ -1,2 +1,3 @@
 Apart from this dockerized environment and another thing that I want to implement, apart from this dockerized environment, so there will be two branches in my GitHub repository, don't worry, is that basically my OpenCLaw will monitor everything, my GPU, my CPU, RAM, and everything that runs on my local device, and then tell me that, okay, I am running this too much, I'm running that too much, maybe my CPU will not be able to handle all of this. These are the processes that I'm running. So it's like a whole asystem monitor, that I will implement.
 
+- Devops agent fully
