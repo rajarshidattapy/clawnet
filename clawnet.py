@@ -3,6 +3,7 @@
 import sys
 import os
 import threading
+from pathlib import Path
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "core"))
 
@@ -15,6 +16,11 @@ def main() -> None:
     if not args:
         threading.Thread(target=_cw._fetch_public_ip, daemon=True).start()
         _cw.run_monitor(resolve=False, auto=False)
+        return
+
+    if "--isolation" in args:
+        from isolation import run_isolation_mode
+        run_isolation_mode()
         return
 
     if "--copilot" in args:
@@ -79,6 +85,49 @@ def main() -> None:
         print("Installed interceptor helpers:")
         for p in files:
             print(f"- {p}")
+    elif args[0] == "sandbox-list":
+        import json as _json
+        import time as _time
+        from rich.console import Console as _Console
+        from rich.table import Table as _Table
+        runner = SandboxRunner()
+        runs = runner.list_runs(limit=int(args[1]) if len(args) > 1 else 20)
+        if not runs:
+            print("No sandbox runs recorded yet.")
+        else:
+            c = _Console()
+            t = _Table(title="Recent Sandbox Runs", border_style="cyan")
+            t.add_column("Run ID", style="cyan", no_wrap=True)
+            t.add_column("Target")
+            t.add_column("Risk", justify="center")
+            t.add_column("Score", justify="right")
+            t.add_column("Recommendation")
+            t.add_column("When")
+            for run in runs:
+                ts = run.get("ts", 0)
+                when = _time.strftime("%Y-%m-%d %H:%M", _time.localtime(ts)) if ts else "?"
+                level = run.get("risk_level", "?")
+                color = {"SAFE": "green", "SUSPICIOUS": "yellow", "DANGEROUS": "red"}.get(level, "white")
+                t.add_row(
+                    run.get("run_id", "?"),
+                    Path(run.get("target", "?")).name,
+                    f"[{color}]{level}[/{color}]",
+                    str(run.get("risk_score", 0)),
+                    run.get("recommendation", "?"),
+                    when,
+                )
+            c.print(t)
+    elif args[0] == "sandbox-report":
+        import json as _json
+        if len(args) < 2:
+            print("Usage: clawnet sandbox-report <run-id>")
+            sys.exit(2)
+        runner = SandboxRunner()
+        report = runner.load_report(args[1])
+        if not report:
+            print(f"No report found for run ID: {args[1]}")
+            sys.exit(1)
+        print(_json.dumps(report, indent=2))
     else:
         threading.Thread(target=_cw._fetch_public_ip, daemon=True).start()
         _cw.run_monitor(
