@@ -82,9 +82,9 @@ It watches your machine in real time, sandboxes suspicious projects before they 
 
 ---
 
-## Kubernetes Runtime Defense (K8sWhisperer)
+## Kubernetes Runtime Defense
 
-ClawNet extends into Kubernetes through **K8sWhisperer** — an autonomous AI incident-response layer for production clusters.
+ClawNet extends into Kubernetes — an autonomous AI incident-response layer for production clusters.
 
 Instead of only detecting threats, ClawNet can now:
 - Investigate failures
