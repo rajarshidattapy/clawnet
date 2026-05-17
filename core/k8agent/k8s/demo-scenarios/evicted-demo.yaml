@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: evicted-demo
+  namespace: k8swhisperer-demo
+spec:
+  containers:
+  - name: disk-hog
+    image: busybox:1.36
+    command: ["/bin/sh", "-c", "dd if=/dev/zero of=/tmp/fill bs=1M count=500; sleep 3600"]
+    resources:
+      limits:
+        ephemeral-storage: "100Mi"
+      requests:
+        ephemeral-storage: "100Mi"

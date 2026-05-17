@@ -1,0 +1,23 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: crashloop-demo
+  namespace: k8swhisperer-demo
+  labels:
+    app: crashloop-demo
+    scenario: crashloop-backoff
+    app.kubernetes.io/name: k8swhisperer
+    app.kubernetes.io/component: demo
+spec:
+  restartPolicy: Always
+  containers:
+    - name: crashloop
+      image: busybox:1.36
+      command: ["sh", "-c", "echo 'Starting...'; sleep 2; exit 1"]
+      resources:
+        requests:
+          cpu: 10m
+          memory: 16Mi
+        limits:
+          cpu: 50m
+          memory: 32Mi

@@ -1,0 +1,19 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: crashloop-deploy-demo
+  namespace: k8swhisperer-demo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: crashloop-demo
+  template:
+    metadata:
+      labels:
+        app: crashloop-demo
+    spec:
+      containers:
+      - name: buggy
+        image: busybox:1.36
+        command: ["/bin/sh", "-c", "echo 'Starting...'; sleep 2; exit 1"]

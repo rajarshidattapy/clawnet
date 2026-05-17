@@ -1,0 +1,30 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: oomkill-demo
+  namespace: k8swhisperer-demo
+  labels:
+    app: oomkill-demo
+    scenario: oom-killed
+    app.kubernetes.io/name: k8swhisperer
+    app.kubernetes.io/component: demo
+spec:
+  restartPolicy: Never
+  containers:
+    - name: oomkill
+      image: polinux/stress:latest
+      command: ["stress"]
+      args:
+        - "--vm"
+        - "1"
+        - "--vm-bytes"
+        - "200M"
+        - "--vm-hang"
+        - "1"
+      resources:
+        requests:
+          cpu: 50m
+          memory: 50Mi
+        limits:
+          cpu: 100m
+          memory: 50Mi

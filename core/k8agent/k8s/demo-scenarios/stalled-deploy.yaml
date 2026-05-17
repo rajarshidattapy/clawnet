@@ -1,0 +1,41 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: stalled-deploy-demo
+  namespace: k8swhisperer-demo
+  labels:
+    app: stalled-deploy-demo
+    scenario: stalled-deployment
+    app.kubernetes.io/name: k8swhisperer
+    app.kubernetes.io/component: demo
+spec:
+  replicas: 3
+  progressDeadlineSeconds: 30
+  selector:
+    matchLabels:
+      app: stalled-deploy-demo
+  template:
+    metadata:
+      labels:
+        app: stalled-deploy-demo
+        scenario: stalled-deployment
+    spec:
+      containers:
+        - name: nginx
+          image: nginx:1.25-alpine
+          ports:
+            - containerPort: 80
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 100m
+              memory: 128Mi

@@ -1,0 +1,8 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: k8swhisperer-demo
+  labels:
+    app.kubernetes.io/name: k8swhisperer
+    app.kubernetes.io/part-of: k8swhisperer
+    app.kubernetes.io/managed-by: kubectl

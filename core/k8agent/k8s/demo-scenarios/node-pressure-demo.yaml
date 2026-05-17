@@ -1,0 +1,22 @@
+# Simulates node memory pressure by creating a pod that consumes excessive memory
+# This triggers eviction and can make nodes report MemoryPressure condition
+apiVersion: v1
+kind: Pod
+metadata:
+  name: node-pressure-demo
+  namespace: k8swhisperer-demo
+  labels:
+    app: node-pressure-demo
+    scenario: node-pressure
+spec:
+  containers:
+  - name: memory-hog
+    image: polinux/stress
+    command: ["stress"]
+    args: ["--vm", "1", "--vm-bytes", "512M", "--vm-hang", "1"]
+    resources:
+      requests:
+        memory: "256Mi"
+      limits:
+        memory: "1Gi"
+  restartPolicy: Never

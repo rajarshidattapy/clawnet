@@ -1,0 +1,86 @@
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: k8swhisperer-agent
+  namespace: k8swhisperer-demo
+  labels:
+    app.kubernetes.io/name: k8swhisperer
+    app.kubernetes.io/component: agent
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: k8swhisperer-agent-role
+  namespace: k8swhisperer-demo
+  labels:
+    app.kubernetes.io/name: k8swhisperer
+    app.kubernetes.io/component: agent
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch", "delete", "patch"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "watch", "patch", "update"]
+  - apiGroups: ["apps"]
+    resources: ["replicasets"]
+    verbs: ["get", "list", "watch"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: k8swhisperer-agent-rolebinding
+  namespace: k8swhisperer-demo
+  labels:
+    app.kubernetes.io/name: k8swhisperer
+    app.kubernetes.io/component: agent
+subjects:
+  - kind: ServiceAccount
+    name: k8swhisperer-agent
+    namespace: k8swhisperer-demo
+roleRef:
+  kind: Role
+  name: k8swhisperer-agent-role
+  apiGroup: rbac.authorization.k8s.io
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: k8swhisperer-agent-clusterrole
+  labels:
+    app.kubernetes.io/name: k8swhisperer
+    app.kubernetes.io/component: agent
+rules:
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["metrics.k8s.io"]
+    resources: ["pods", "nodes"]
+    verbs: ["get", "list"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: k8swhisperer-agent-clusterrolebinding
+  labels:
+    app.kubernetes.io/name: k8swhisperer
+    app.kubernetes.io/component: agent
+subjects:
+  - kind: ServiceAccount
+    name: k8swhisperer-agent
+    namespace: k8swhisperer-demo
+roleRef:
+  kind: ClusterRole
+  name: k8swhisperer-agent-clusterrole
+  apiGroup: rbac.authorization.k8s.io

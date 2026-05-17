@@ -1,0 +1,22 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pending-demo
+  namespace: k8swhisperer-demo
+  labels:
+    app: pending-demo
+    scenario: pending-insufficient-cpu
+    app.kubernetes.io/name: k8swhisperer
+    app.kubernetes.io/component: demo
+spec:
+  restartPolicy: Never
+  containers:
+    - name: pending
+      image: nginx:1.25-alpine
+      resources:
+        requests:
+          cpu: "100"
+          memory: 64Mi
+        limits:
+          cpu: "100"
+          memory: 128Mi

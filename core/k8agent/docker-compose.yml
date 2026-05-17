@@ -1,0 +1,38 @@
+version: "3.8"
+
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    volumes:
+      # Mount kubeconfig so the backend can talk to the host's K8s cluster
+      - ${KUBECONFIG:-~/.kube/config}:/root/.kube/config:ro
+      # Persist audit logs and runbook cache across restarts
+      - k8s-data:/app/data
+      # Mount demo scenarios for chaos injection (kubectl apply)
+      - ./k8s:/app/k8s:ro
+    environment:
+      - KUBECONFIG=/root/.kube/config
+    # On Linux, use host network to reach kind cluster at 127.0.0.1
+    # On Mac/Windows, kind exposes the API server on host.docker.internal
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+    ports:
+      - "3000:80"
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+volumes:
+  k8s-data:
