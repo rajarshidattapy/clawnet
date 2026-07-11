@@ -1,6 +1,3 @@
-# NetWatch
-
-![img](img.png)
 
 **Real-time network security observability for macOS endpoints.**
 
