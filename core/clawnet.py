@@ -90,6 +90,11 @@ except ImportError:
         SuperMemory = None  # type: ignore
         make_event  = None  # type: ignore
 
+try:
+    import policy
+except ImportError:
+    from core import policy  # type: ignore
+
 console = Console()
 
 BANNER = r"""
@@ -132,14 +137,6 @@ RISK_PORTS: dict[int, tuple[str, str]] = {
     8443:  ("HTTPS-Alt",  "green"),
     27017: ("MongoDB",    "bold yellow"),
     6379:  ("Redis",      "bold yellow"),
-}
-
-_PORT_SCORE: dict[int, int] = {
-    23: 4, 21: 4, 4444: 4,
-    3389: 3,
-    22: 2, 25: 2, 3306: 2, 5432: 2, 27017: 2, 6379: 2,
-    80: 1, 8080: 1,
-    443: 0, 8443: 0, 53: 0,
 }
 
 _SUSPICIOUS_PATHS = (
@@ -255,24 +252,45 @@ def get_dns_servers() -> str:
 
 # ── safe actions ──────────────────────────────────────────────────────────────
 
-def kill_process(pid: int) -> bool:
+def _proc_name(pid: Optional[int]) -> str:
+    try:
+        return psutil.Process(pid).name() if pid else ""
+    except Exception:
+        return ""
+
+
+def kill_process(pid: int) -> tuple[bool, str]:
+    """Guardrailed. Refuses protected system processes — see policy.PROTECTED_PROCS."""
+    refusal = policy.check_action("kill_process", pid=pid, process=_proc_name(pid))
+    if refusal:
+        policy.log_decision("refused", action="kill_process", pid=pid, reason=refusal)
+        return False, f"Refused: {refusal}"
     try:
         subprocess.run(["taskkill", "/F", "/PID", str(pid)],
                        capture_output=True, timeout=5)
-        return True
-    except Exception:
-        return False
+        return True, f"Killed PID {pid}"
+    except Exception as exc:
+        return False, f"Failed to kill PID {pid}: {exc}"
 
 
-def suspend_process(pid: int) -> bool:
+def suspend_process(pid: int) -> tuple[bool, str]:
+    refusal = policy.check_action("suspend_process", pid=pid, process=_proc_name(pid))
+    if refusal:
+        policy.log_decision("refused", action="suspend_process", pid=pid, reason=refusal)
+        return False, f"Refused: {refusal}"
     try:
         psutil.Process(pid).suspend()
-        return True
-    except Exception:
-        return False
+        return True, f"Suspended PID {pid}"
+    except Exception as exc:
+        return False, f"Failed to suspend PID {pid}: {exc}"
 
 
-def block_ip(ip: str) -> bool:
+def block_ip(ip: str) -> tuple[bool, str]:
+    """Guardrailed. Refuses private/local IPs — blocking those cuts your own network."""
+    refusal = policy.check_action("block_ip", ip=ip)
+    if refusal:
+        policy.log_decision("refused", action="block_ip", ip=ip, reason=refusal)
+        return False, f"Refused: {refusal}"
     try:
         rule = f"ClawNet-Block-{ip}"
         subprocess.run([
@@ -280,28 +298,34 @@ def block_ip(ip: str) -> bool:
             f"name={rule}", "dir=out", "action=block",
             f"remoteip={ip}", "protocol=any", "enable=yes",
         ], capture_output=True, timeout=5)
-        return True
-    except Exception:
-        return False
+        return True, f"Blocked {ip} via firewall"
+    except Exception as exc:
+        return False, f"Failed to block {ip}: {exc}"
 
 
 def close_port(port: int) -> list[int]:
     killed: list[int] = []
     for conn in psutil.net_connections():
         if conn.laddr and conn.laddr.port == port and conn.pid:
-            if kill_process(conn.pid):
+            ok, _ = kill_process(conn.pid)
+            if ok:
                 killed.append(conn.pid)
     return killed
 
 
-def quarantine_file(path: str) -> bool:
+def quarantine_file(path: str) -> tuple[bool, str]:
+    """Guardrailed. Only files under user-writable/temp paths can be quarantined."""
+    refusal = policy.check_action("quarantine_file", path=path)
+    if refusal:
+        policy.log_decision("refused", action="quarantine_file", path=path, reason=refusal)
+        return False, f"Refused: {refusal}"
     if not _HAS_SEND2TRASH:
-        return False
+        return False, "send2trash not installed — pip install send2trash"
     try:
         _send2trash.send2trash(path)
-        return True
-    except Exception:
-        return False
+        return True, f"Moved to Recycle Bin: {path}"
+    except Exception as exc:
+        return False, f"Quarantine failed: {exc}"
 
 
 def inspect_file(path: str) -> dict:
@@ -323,20 +347,24 @@ def inspect_file(path: str) -> dict:
 
 
 def execute_action(action_type: str, pid: Optional[int], remote_ip: str,
-                   state: "ClawState") -> str:
-    ts = datetime.now().strftime("%H:%M:%S")
-    msg = ""
+                   state: "ClawState", approved_by: str = "unknown") -> str:
+    """Run a remediation action. Only ever called after a human approved it."""
+    ts   = datetime.now().strftime("%H:%M:%S")
+    msgs: list[str] = []
     if action_type in ("kill_process", "kill_and_block") and pid:
-        ok  = kill_process(pid)
-        msg = f"[{ts}] {'✓' if ok else '✗'} KILLED  pid {pid}"
-        with state.lock:
-            state.action_log.append(msg)
+        ok, detail = kill_process(pid)
+        msgs.append(f"[{ts}] {'✓' if ok else '✗'} {detail}")
+        policy.log_decision("action", action="kill_process", pid=pid,
+                            ok=ok, detail=detail, approved_by=approved_by)
     if action_type in ("block_ip", "kill_and_block") and remote_ip:
-        ok  = block_ip(remote_ip)
-        msg = f"[{ts}] {'✓' if ok else '✗'} BLOCKED {remote_ip}"
+        ok, detail = block_ip(remote_ip)
+        msgs.append(f"[{ts}] {'✓' if ok else '✗'} {detail}")
+        policy.log_decision("action", action="block_ip", ip=remote_ip,
+                            ok=ok, detail=detail, approved_by=approved_by)
+    if msgs:
         with state.lock:
-            state.action_log.append(msg)
-    return msg or "done"
+            state.action_log.extend(msgs)
+    return "\n".join(msgs) or "done"
 
 # ── network helpers ───────────────────────────────────────────────────────────
 
@@ -367,26 +395,48 @@ def port_style(port: int) -> str:
     return RISK_PORTS[port][1] if port in RISK_PORTS else "white"
 
 
+_memory_ref: list = [None]      # SuperMemory instance, set by run_monitor
+
+_verdict_cache: dict[tuple, tuple] = {}   # conn_key -> (ts, Evidence, Verdict)
+_verdict_lock  = threading.Lock()
+_VERDICT_TTL   = 5.0            # re-evaluate a live connection every 5 s
+
+
+def verdict_for(conn) -> tuple:
+    """Evidence + deterministic verdict for one connection. Cached for _VERDICT_TTL.
+
+    This is the ONLY place a risk level is decided. The table, the alerts, the
+    Telegram gate and the AI panel all read from here.
+    """
+    ck  = _conn_key(conn)
+    now = time.monotonic()
+    with _verdict_lock:
+        hit = _verdict_cache.get(ck)
+        if hit and now - hit[0] < _VERDICT_TTL:
+            return hit[1], hit[2]
+
+    rip = conn.raddr.ip if conn.raddr else ""
+    geo = _geo_cache.get(rip, "") if rip else ""
+    ev  = policy.collect(conn, geo=("" if geo in ("…", "?") else geo),
+                         memory=_memory_ref[0], deep=True)
+    v   = policy.evaluate(ev)
+
+    with _verdict_lock:
+        _verdict_cache[ck] = (now, ev, v)
+        for k in [k for k, hit in _verdict_cache.items() if now - hit[0] > 60]:
+            del _verdict_cache[k]
+    return ev, v
+
+
 def calc_risk(conn, suspicious_path: bool = False) -> tuple[str, str]:
-    rip    = conn.raddr.ip   if conn.raddr else ""
-    rport  = conn.raddr.port if conn.raddr else 0
-    laddr  = conn.laddr
-    status = getattr(conn, "status", "NONE") or "NONE"
-    eff    = rport or (laddr.port if laddr else 0)
-    score  = _PORT_SCORE.get(eff, 1)
-    if _is_external(rip) and status == "ESTABLISHED":
-        score += 1
-    if status == "LISTEN" and laddr and laddr.ip in ("0.0.0.0", "::"):
-        score += 1
-    if status == "SYN_SENT" and _is_external(rip):
-        score += 1
-    if suspicious_path:
-        score += 2
-    if score >= 4:
+    """Display label for the policy verdict. `suspicious_path` is now derived
+    from the evidence itself and kept only for call-site compatibility."""
+    _, v = verdict_for(conn)
+    if v.level == "CRITICAL":
         return "● HIGH", "bold red"
-    if score >= 2:
-        return "◆ MED",  "bold yellow"
-    return "○ LOW",  "dim green"
+    if v.level == "SUSPICIOUS":
+        return "◆ MED", "bold yellow"
+    return "○ LOW", "dim green"
 
 # ── GeoIP ─────────────────────────────────────────────────────────────────────
 
@@ -550,6 +600,10 @@ def parse_command(text: str) -> tuple[str, dict]:
     if m:
         return "inspect", {"path": m.group(1).strip()}
 
+    m = re.match(r'(?:explain|why)\s+(?:pid\s+)?(\d+)', t, re.I)
+    if m:
+        return "explain", {"pid": int(m.group(1))}
+
     if re.match(r'show\s+(?:all\s+)?foreign', t, re.I):
         return "show_foreign", {}
 
@@ -586,26 +640,21 @@ def _run_chat_command(state: "ClawState", oc, msg: str) -> str:
     cmd, args = parse_command(msg)
     ts = datetime.now().strftime("%H:%M:%S")
 
-    if cmd == "kill":
-        pid = args["pid"]
-        ok  = kill_process(pid)
-        r   = f"✓ Killed PID {pid}" if ok else f"✗ Failed to kill PID {pid}"
-        with state.lock:
-            state.action_log.append(f"[{ts}] {r}")
-        return r
-
-    if cmd == "block":
-        ip = args["ip"]
-        ok = block_ip(ip)
-        r  = f"✓ Blocked {ip} via firewall" if ok else f"✗ Failed to block {ip}"
-        with state.lock:
-            state.action_log.append(f"[{ts}] {r}")
-        return r
-
-    if cmd == "suspend":
-        pid = args["pid"]
-        ok  = suspend_process(pid)
-        r   = f"✓ Suspended PID {pid}" if ok else f"✗ Failed to suspend PID {pid}"
+    # A typed command IS the explicit human approval — guardrails still apply.
+    if cmd in ("kill", "block", "suspend"):
+        if cmd == "kill":
+            ok, detail = kill_process(args["pid"])
+            policy.log_decision("action", action="kill_process", pid=args["pid"],
+                                ok=ok, detail=detail, approved_by="chat")
+        elif cmd == "block":
+            ok, detail = block_ip(args["ip"])
+            policy.log_decision("action", action="block_ip", ip=args["ip"],
+                                ok=ok, detail=detail, approved_by="chat")
+        else:
+            ok, detail = suspend_process(args["pid"])
+            policy.log_decision("action", action="suspend_process", pid=args["pid"],
+                                ok=ok, detail=detail, approved_by="chat")
+        r = f"{'✓' if ok else '✗'} {detail}"
         with state.lock:
             state.action_log.append(f"[{ts}] {r}")
         return r
@@ -620,11 +669,10 @@ def _run_chat_command(state: "ClawState", oc, msg: str) -> str:
         return r
 
     if cmd == "quarantine":
-        path = args["path"]
-        if not _HAS_SEND2TRASH:
-            return "send2trash not installed — pip install send2trash"
-        ok = quarantine_file(path)
-        r  = f"✓ Moved to Recycle Bin: {path}" if ok else f"✗ Quarantine failed: {path}"
+        ok, detail = quarantine_file(args["path"])
+        policy.log_decision("action", action="quarantine_file", path=args["path"],
+                            ok=ok, detail=detail, approved_by="chat")
+        r = f"{'✓' if ok else '✗'} {detail}"
         with state.lock:
             state.action_log.append(f"[{ts}] {r}")
         return r
@@ -637,6 +685,31 @@ def _run_chat_command(state: "ClawState", oc, msg: str) -> str:
                 f"Size:     {fmt_bytes(info['size'])}\n"
                 f"Modified: {info['modified']}\n"
                 f"SHA256:   {info['sha256'][:32]}…")
+
+    if cmd == "explain":
+        pid = args["pid"]
+        with state.lock:
+            conns = list(state.connections)
+        match = [c for c in conns if c.pid == pid]
+        if not match:
+            return f"No active connection for PID {pid}."
+        ev, v = verdict_for(match[0])
+        lines = [
+            f"VERDICT   {v.level}  (score {v.score}, confidence {v.confidence:.0%})",
+            f"PROCESS   {ev.process}  pid {ev.pid}  parent {ev.parent or '?'}",
+            f"EXE       {ev.exe or 'unknown'}",
+            f"SHA256    {ev.sha256[:32] or 'unavailable'}",
+            f"REMOTE    {ev.remote or '—'}:{ev.rport or '—'}  {ev.country or ''}"
+            f"  [{'foreign' if ev.foreign else 'local'}]",
+            f"ACTION    {v.action}",
+            "",
+            "TRIGGERED RULES:",
+        ]
+        lines += [f"  +{p:<2} {rid:<20} {desc}" for rid, p, desc in v.rules] or ["  (none)"]
+        a = oc.get(_conn_key(match[0])) if oc else None
+        if a and a.reason and not a.pending:
+            lines += ["", f"ANALYST   {a.reason}"]
+        return "\n".join(lines)
 
     if cmd == "show_foreign":
         with state.lock:
@@ -770,18 +843,9 @@ def _input_thread(state: "ClawState", oc, tg, live_ref: list) -> None:
 # ── Telegram helpers ──────────────────────────────────────────────────────────
 
 def _execute_tg_action(state: "ClawState", action) -> None:
-    execute_action(action.action_type, action.pid, action.remote_ip, state)
-
-
-def _openclaw_alert_key(ai) -> tuple:
-    return (
-        "openclaw",
-        getattr(ai, "level", ""),
-        getattr(ai, "process", ""),
-        getattr(ai, "remote", ""),
-        getattr(ai, "pid", None),
-        getattr(ai, "reason", ""),
-    )
+    """Called only when the user pressed Approve in Telegram."""
+    execute_action(action.action_type, action.pid, action.remote_ip, state,
+                   approved_by="telegram")
 
 
 def _send_openclaw_alert(tg, level: str, process: str, pid, remote: str,
@@ -811,6 +875,7 @@ def _send_openclaw_alert(tg, level: str, process: str, pid, remote: str,
 
 
 def _maybe_telegram_alert(state: "ClawState", connections: list, oc, tg) -> None:
+    """Alert on the policy verdict. The AI's text is a nice-to-have, never a gate."""
     if tg is None or not getattr(tg, "ready", False):
         return
     for conn in connections:
@@ -818,119 +883,74 @@ def _maybe_telegram_alert(state: "ClawState", connections: list, oc, tg) -> None
         with state.lock:
             if ck in state.alerted_keys:
                 continue
-        proc_name, _, suspicious = get_proc_info(conn.pid)
-        risk_label, _ = calc_risk(conn, suspicious_path=suspicious)
-        ai  = oc.get(ck) if oc and oc.available else None
-        rip = conn.raddr.ip   if conn.raddr else ""
-
-        should_alert = False
-        alert_level  = ""
-        alert_reason = ""
-
-        # AI verdict takes priority
-        if ai and not ai.pending:
-            if ai.level in ("CRITICAL", "SUSPICIOUS"):
-                should_alert = True
-                alert_level  = ai.level
-                alert_reason = ai.reason
-
-        # Heuristic HIGH — no need to wait for AI
-        if not should_alert and risk_label == "● HIGH":
-            should_alert = True
-            alert_level  = "HIGH"
-            alert_reason = "High-risk connection (heuristic)"
-
-        # Suspicious path + foreign connection — alert immediately without AI
-        if not should_alert and suspicious and rip and _is_external(rip):
-            should_alert = True
-            alert_level  = "SUSPICIOUS"
-            alert_reason = f"Process running from suspicious path with foreign connection"
-
-        if should_alert:
-            ai_key = _openclaw_alert_key(ai) if (ai and not ai.pending) else None
-            with state.lock:
-                if ck in state.alerted_keys or (ai_key and ai_key in state.alerted_keys):
-                    continue
-                state.alerted_keys.add(ck)
-                if ai_key:
-                    state.alerted_keys.add(ai_key)
-            rport = conn.raddr.port if conn.raddr else "—"
-            geo   = _geo_cache.get(rip, "?") if rip else "—"
-            action_text = (ai.action if (ai and not ai.pending) else "monitor")
-            _send_openclaw_alert(
-                tg, alert_level, proc_name, conn.pid, rip, rport, geo,
-                alert_reason, action_text,
-            )
-    if oc is None or not getattr(oc, "available", False):
-        return
-    for ai in oc.all_analyses():
-        if ai.pending or ai.level not in ("CRITICAL", "SUSPICIOUS"):
+        ev, v = verdict_for(conn)
+        if v.level not in ("CRITICAL", "SUSPICIOUS"):
             continue
-        ai_key = _openclaw_alert_key(ai)
         with state.lock:
-            if ai_key in state.alerted_keys:
+            if ck in state.alerted_keys:
                 continue
-            state.alerted_keys.add(ai_key)
-        remote = getattr(ai, "remote", "") or ""
-        geo = _geo_cache.get(remote, "?") if remote else "—"
+            state.alerted_keys.add(ck)
+
+        a = oc.get(ck) if oc and oc.available else None
+        reason = (a.reason if (a and not a.pending and a.reason) else v.summary)
         _send_openclaw_alert(
-            tg,
-            ai.level,
-            ai.process,
-            ai.pid,
-            remote,
-            "",
-            geo,
-            ai.reason,
-            ai.action,
+            tg, v.level, ev.process, ev.pid, ev.remote, ev.rport or "—",
+            ev.country or "—",
+            f"{reason}  [score {v.score}, confidence {v.confidence:.0%}]",
+            v.action,
         )
 
 
-def _maybe_auto_respond(connections: list, oc, auto: bool, tg, state: "ClawState") -> None:
-    if oc is None or not oc.available:
-        return
+def _maybe_request_approval(connections: list, oc, auto: bool, tg, state: "ClawState") -> None:
+    """Human approval gate.
+
+    High-risk remediation (kill / block / quarantine) is NEVER executed here.
+    It is queued for the user to approve — in Telegram if configured, otherwise
+    surfaced in the remediation log with the command to type. `--auto` does not
+    bypass this; nothing kills a process without a human saying so.
+    """
     for conn in connections:
         ck = _conn_key(conn)
         with state.lock:
             if ck in state.actioned:
                 continue
-        a = oc.get(ck)
-        if not (a and not a.pending and a.level == "CRITICAL" and a.action != "none"):
+        ev, v = verdict_for(conn)
+        if v.level != "CRITICAL" or not policy.needs_approval(v.action):
             continue
         with state.lock:
             state.actioned.add(ck)
-        rip = conn.raddr.ip if conn.raddr else ""
-        if auto:
-            execute_action(a.action, a.pid, rip, state)
-        elif tg and getattr(tg, "available", False):
-            action_id = f"oc-{conn.pid or 0}-{int(time.time()) % 10000}"
-            pa = PendingAction(
-                action_id=action_id, pid=a.pid, remote_ip=rip,
-                process=a.process, action_type=a.action, reason=a.reason,
-            )
-            tg.add_pending(pa)
+
+        a      = oc.get(ck) if oc and oc.available else None
+        reason = (a.reason if (a and not a.pending and a.reason) else v.summary)
+        policy.log_decision("approval_requested", action=v.action, pid=ev.pid,
+                            process=ev.process, ip=ev.remote, level=v.level,
+                            score=v.score, rules=[r[0] for r in v.rules])
+
+        if tg and getattr(tg, "available", False) and PendingAction is not None:
+            tg.add_pending(PendingAction(
+                action_id=f"oc-{ev.pid or 0}-{int(time.time()) % 10000}",
+                pid=ev.pid, remote_ip=ev.remote, process=ev.process,
+                action_type=v.action, reason=reason,
+            ))
+            note = f"⏳ APPROVAL REQUESTED — {v.action} {ev.process} (see Telegram)"
+        else:
+            cmd  = (f"kill {ev.pid}" if v.action in ("kill_process", "kill_and_block")
+                    else f"block {ev.remote}")
+            note = f"⏳ APPROVAL NEEDED — {v.action} {ev.process}: type '{cmd}'"
+        with state.lock:
+            state.action_log.append(f"[{datetime.now().strftime('%H:%M:%S')}] {note}")
 
 
 def maybe_request_analysis(connections: list, new_keys: set, oc) -> None:
-    if oc is None or not oc.available:
+    """Publish verdicts and (if AI is on) queue them for explanation."""
+    if oc is None:
         return
     for conn in connections:
-        ck = _conn_key(conn)
-        proc_name, exe, suspicious = get_proc_info(conn.pid)
-        risk_label, _ = calc_risk(conn, suspicious_path=suspicious)
-        if ck not in new_keys and risk_label != "● HIGH" and not suspicious:
+        ck    = _conn_key(conn)
+        ev, v = verdict_for(conn)
+        if ck not in new_keys and v.level == "SAFE":
             continue
-        rip   = conn.raddr.ip   if conn.raddr else ""
-        rport = conn.raddr.port if conn.raddr else None
-        proto = "TCP" if conn.type == socket.SOCK_STREAM else "UDP"
-        oc.request(ck, {
-            "process": proc_name, "exe": exe or "unknown",
-            "proto": proto, "status": getattr(conn, "status", "NONE") or "NONE",
-            "local": f"{conn.laddr.ip}:{conn.laddr.port}" if conn.laddr else "—",
-            "remote": rip, "rport": rport or "",
-            "country": _geo_cache.get(rip, "?") if rip else "local",
-            "suspicious": suspicious, "risk": risk_label, "pid": conn.pid,
-        })
+        oc.request(ck, ev, v)
 
 # ── UI panels ─────────────────────────────────────────────────────────────────
 
@@ -966,17 +986,18 @@ def build_header() -> Panel:
 
 
 def _ai_flag(oc, conn_key: tuple) -> tuple[str, str]:
-    if oc is None or not oc.available:
+    """Flag reflects the POLICY verdict; '~' only means the AI blurb is still loading."""
+    if oc is None:
         return "", ""
     a = oc.get(conn_key)
     if a is None:
         return "", ""
-    if a.pending:
-        return "~", "dim"
     if a.level == "CRITICAL":
         return "C", "bold bright_red"
     if a.level == "SUSPICIOUS":
         return "S", "bold yellow"
+    if a.pending:
+        return "~", "dim"
     if a.level == "SAFE":
         return "✓", "dim green"
     return "?", "dim"
@@ -1146,38 +1167,45 @@ def build_openclaw_panel(oc, tg, state: "ClawState") -> Panel:
             lines.append(f"[dim green]Telegram: {tg.status}{pt}[/dim green]")
         lines.append("")
 
-    if oc is None or not oc.available:
-        reason = (
-            "[red]openai[/red] not installed" if OpenClaw is None
-            else "[yellow]OPENAI_API_KEY[/yellow] not set"
-            if not os.environ.get("OPENAI_API_KEY") else "unavailable"
-        )
-        lines.append(f"[dim]AI analysis disabled — {reason}[/dim]")
+    if oc is None:
+        lines.append("[dim]Policy engine unavailable.[/dim]")
         border = "bright_black"
     else:
-        analyses   = oc.all_analyses()
-        critical   = [a for a in analyses if not a.pending and a.level == "CRITICAL"]
-        suspicious = [a for a in analyses if not a.pending and a.level == "SUSPICIOUS"]
-        analyzing  = sum(1 for a in analyses if a.pending)
+        if not oc.available:
+            why = ("[red]openai[/red] not installed" if not os.environ.get("OPENAI_API_KEY")
+                   else "[yellow]OPENAI_API_KEY[/yellow] not set")
+            lines.append(f"[dim]Verdicts live (policy engine). AI explanations off — {why}.[/dim]")
+            lines.append("")
 
-        if analyzing:
-            lines.append(f"[dim]Analyzing {analyzing} connection(s)…[/dim]")
+        analyses   = oc.all_analyses()
+        critical   = [a for a in analyses if a.level == "CRITICAL"]
+        suspicious = [a for a in analyses if a.level == "SUSPICIOUS"]
+        explaining = sum(1 for a in analyses if a.pending)
+
         for a in critical[:5]:
             proc   = f"[bold]{a.process}[/]" if a.process else ""
             remote = f" → [dim]{a.remote}[/dim]" if a.remote else ""
             lines.append(
-                f"[bold bright_red]● CRITICAL[/] {proc}{remote}\n"
-                f"  [dim]{a.reason}[/dim]  [red]→ {a.action}[/red]"
+                f"[bold bright_red]● CRITICAL[/] {proc}{remote}  "
+                f"[dim]score {a.score} · conf {a.confidence:.0%}[/dim]\n"
+                f"  [dim]{_markup_escape(a.reason)}[/dim]\n"
+                f"  [bright_black]rules: {', '.join(a.rules) or '—'}[/bright_black]  "
+                f"[red]→ {a.action} (needs approval)[/red]"
             )
         for a in suspicious[:3]:
             proc   = f"[bold]{a.process}[/]" if a.process else ""
             remote = f" → [dim]{a.remote}[/dim]" if a.remote else ""
             lines.append(
-                f"[yellow]◆ SUSPICIOUS[/] {proc}{remote}\n  [dim]{a.reason}[/dim]"
+                f"[yellow]◆ SUSPICIOUS[/] {proc}{remote}  "
+                f"[dim]score {a.score} · conf {a.confidence:.0%}[/dim]\n"
+                f"  [dim]{_markup_escape(a.reason)}[/dim]\n"
+                f"  [bright_black]rules: {', '.join(a.rules) or '—'}[/bright_black]"
             )
+        if explaining:
+            lines.append(f"[dim]Explaining {explaining} verdict(s)…[/dim]")
         if not analyses:
-            lines.append("[dim]Waiting for connections to analyze…[/dim]")
-        elif not critical and not suspicious and not analyzing:
+            lines.append("[dim]Waiting for connections to evaluate…[/dim]")
+        elif not critical and not suspicious:
             lines.append("[dim green]✓ No threats detected[/dim green]")
 
         border = "bold red" if critical else ("yellow" if suspicious else "bright_black")
@@ -1303,7 +1331,7 @@ def _data_collector(state: "ClawState", oc, tg, auto: bool) -> None:
                 state.connections = connections
                 state.new_keys    = new_keys
             maybe_request_analysis(connections, new_keys, oc)
-            _maybe_auto_respond(connections, oc, auto, tg, state)
+            _maybe_request_approval(connections, oc, auto, tg, state)
             _maybe_telegram_alert(state, connections, oc, tg)
         except Exception:
             pass
@@ -1318,6 +1346,7 @@ def run_monitor(resolve: bool = False, auto: bool = False) -> None:
     mem = None
     if SuperMemory is not None:
         mem = SuperMemory()
+    _memory_ref[0] = mem            # policy rules can now see prior sightings
 
     oc = OpenClaw(memory=mem) if OpenClaw is not None else None
 
@@ -1345,6 +1374,12 @@ def run_monitor(resolve: bool = False, auto: bool = False) -> None:
         ))
     if not tg_token:
         console.print("[dim]Telegram: TELEGRAM_BOT_TOKEN not set — alerts disabled.[/dim]")
+    if auto:
+        console.print(
+            "[yellow]--auto: kill/block still require your approval — the gate cannot be "
+            "bypassed. Approve in Telegram, or type 'kill <pid>' / 'block <ip>'.[/yellow]"
+        )
+    console.print(f"[dim]Decision log: {policy.DECISION_LOG}[/dim]")
 
     try:
         with Live(console=console, refresh_per_second=2, screen=False) as live:

@@ -1,5 +1,5 @@
 
-**Real-time network security observability for macOS endpoints.**
+**Real-time network security observability for endpoints.**
 
 NetWatch is a terminal-based security monitoring tool that gives you continuous, live visibility into every active network connection on your machine with automatic risk scoring, GeoIP intelligence, VPN status, process path validation, and new-connection alerting. Built for security-conscious individuals, developers, and teams who need to know exactly what their machine is talking to and why.
 
