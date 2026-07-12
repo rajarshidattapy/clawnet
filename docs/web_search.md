@@ -2,22 +2,33 @@ Implement a dedicated Threat Intelligence Agent in a single new file:
 
 core/web_search.py
 
-This file should contain all web search, threat intelligence ingestion, enrichment, caching, and SuperMemory integration logic. Keep the implementation modular so the rest of ClawNet simply imports and calls this module.
+This module should be the only place responsible for web crawling, threat intelligence ingestion, Supermemory Local integration, caching, enrichment, and retrieval. All other ClawNet modules should consume this module through clean helper APIs.
 
 Requirements:
 
-1. Build a background Threat Intelligence Agent that periodically fetches recent security intelligence using Firecrawl (free tier) as the primary web search/crawling engine.
+1. Integrate Supermemory Local using the official Python SDK.
 
-2. Crawl trusted public security sources including:
+Connect to the local server:
+
+- base_url=http://localhost:6767
+- API key loaded from environment
+
+Do not build a custom vector database or memory implementation.
+
+2. Build a background Threat Intelligence Agent that periodically fetches recent security intelligence using Firecrawl (free tier) as the primary crawler.
+
+3. Crawl trusted public sources including:
+
 - CISA Known Exploited Vulnerabilities
 - NVD CVE Database
 - MITRE ATT&CK
 - GitHub Security Advisories
 - Vendor security advisories
 - Malware reports
-- Public threat blogs
+- Public security blogs
 
-3. Normalize every fetched document into structured threat intelligence containing:
+4. Normalize every fetched document into structured threat intelligence containing:
+
 - CVE IDs
 - IOCs (IPs, domains, URLs, hashes)
 - affected software
@@ -27,32 +38,62 @@ Requirements:
 - source
 - summary
 
-4. Store all normalized intelligence inside SuperMemory so the local OpenClaw model can retrieve recent security knowledge without performing live web searches.
+5. Store every normalized document inside Supermemory Local using the official SDK.
 
-5. Build a local Threat Knowledge Base that continuously grows over time and persists between sessions.
+Use appropriate container tags such as:
 
-6. Implement IOC enrichment APIs.
+- threat_feed
+- cve
+- malware
+- advisory
+- reputation
 
-Given an:
+Store only structured evidence, never arbitrary LLM-generated text.
+
+6. Build a persistent local Threat Knowledge Base using Supermemory.
+
+The database should survive restarts and continuously grow as new threat intelligence is ingested.
+
+7. Implement IOC enrichment APIs.
+
+Given:
+
 - IP
 - Domain
 - URL
-- File hash
+- File Hash
 - Process
 - Package
 - Dependency
 
-search the local knowledge base first and return matching CVEs, advisories, malware reports, reputation, and related evidence.
+search Supermemory first and return:
 
-7. Implement semantic retrieval so OpenClaw can query SuperMemory for relevant security context before generating explanations.
+- matching CVEs
+- IOC reputation
+- malware reports
+- advisories
+- previous evidence
+- related incidents
 
-8. Cache all fetched intelligence locally to minimize repeated web requests and API usage.
+8. Implement semantic retrieval using Supermemory search.
 
-9. Continuously refresh threat intelligence in the background (configurable interval) without blocking the monitoring UI.
+OpenClaw should retrieve only relevant threat intelligence before generating explanations.
 
-10. Build a Threat Timeline so newly published CVEs and advisories are stored chronologically. If a sandboxed project contains an affected dependency, ClawNet should immediately reference the relevant CVE from memory.
+The LLM must never perform live web searches.
 
-11. Expose clean helper functions such as:
+9. Cache fetched web content locally to avoid unnecessary crawling and API usage.
+
+10. Build a chronological Threat Timeline inside Supermemory.
+
+Every newly ingested CVE or advisory should remain searchable by:
+
+- publication date
+- affected package
+- CVE
+- IOC
+- software
+
+11. Expose clean helper APIs:
 
 - update_threat_intelligence()
 - enrich_ip(ip)
@@ -64,36 +105,52 @@ search the local knowledge base first and return matching CVEs, advisories, malw
 - get_recent_cves()
 - get_related_threats(query)
 
-12. Integrate this module into the deterministic policy engine.
+12. Integrate this module with the deterministic Policy Engine.
 
-Before generating any verdict:
-- enrich all evidence using web_search.py
-- retrieve matching threat intelligence
-- attach supporting evidence
-- pass only structured evidence to OpenClaw
+Before any verdict:
 
-13. Replace opaque AI reasoning with evidence-backed explanations.
+Policy Engine
+→ query web_search.py
+→ retrieve matching threat intelligence from Supermemory
+→ attach structured evidence
+→ pass only structured evidence to OpenClaw
+
+13. OpenClaw must act only as an explanation layer.
 
 Every explanation should reference:
-- matching CVEs
-- matched IOC reputation
+
+- matched CVEs
+- IOC reputation
 - advisory summaries
-- threat intelligence source
-- supporting evidence from SuperMemory
+- publication dates
+- threat intelligence sources
+- retrieved evidence from Supermemory
 
 Never allow the LLM to invent security claims.
 
-14. Integrate this module into the Chain of Trust pipeline:
+14. Integrate this module into the Chain of Trust:
 
 Sandbox Report
 → Policy Engine
 → Signature Verification
 → SBOM Generation
-→ Dependency Vulnerability Scan
+→ Dependency Scan
 → Threat Intelligence Lookup (web_search.py)
 → Human Approval
 → Promote to Host
 
-15. Make the implementation completely modular so future threat providers can be added easily without changing the rest of ClawNet.
+15. Keep the implementation fully modular.
 
-All web search, crawling, normalization, caching, memory storage, enrichment, and retrieval logic should live exclusively inside core/web_search.py.
+Future providers (VirusTotal, AbuseIPDB, OTX, URLHaus, etc.) should be pluggable without modifying the rest of ClawNet.
+
+Only core/web_search.py should contain:
+
+- Firecrawl integration
+- Supermemory SDK integration
+- document ingestion
+- semantic retrieval
+- caching
+- threat intelligence normalization
+- enrichment logic
+
+Every other module should simply call the helper APIs exposed by web_search.py.

@@ -92,6 +92,14 @@ except ImportError:
         make_evidence = None  # type: ignore
 
 try:
+    from web_search import start_threat_intelligence_agent
+except ImportError:
+    try:
+        from core.web_search import start_threat_intelligence_agent
+    except ImportError:
+        start_threat_intelligence_agent = None  # type: ignore
+
+try:
     import policy
 except ImportError:
     from core import policy  # type: ignore
@@ -1376,6 +1384,9 @@ def _data_collector(state: "ClawState", oc, tg, auto: bool) -> None:
 def run_monitor(resolve: bool = False, auto: bool = False) -> None:
     admin = is_admin()
     state = ClawState()
+
+    if start_threat_intelligence_agent is not None:
+        start_threat_intelligence_agent()
 
     mem = None
     if SuperMemory is not None:

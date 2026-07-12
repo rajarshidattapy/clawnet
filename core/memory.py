@@ -19,7 +19,6 @@ Modularity: the Policy Engine, sandbox, and the ClawNet agent all import this on
 store. The agent only ever *queries* it (it must never write observations).
 """
 import json
-import os
 import threading
 import time
 from collections import deque
@@ -27,18 +26,10 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
-try:
-    from supermemory import Supermemory as _SDK
-    _HAS_SDK = True
-except ImportError:
-    _HAS_SDK = False
-
 _DIR             = Path.home() / ".clawnet"
 _EVIDENCE_PATH   = _DIR / "evidence.jsonl"
 _LEGACY_JSON     = _DIR / "memory.json"          # migrated in on first load
 _MAX_RECORDS     = 10000
-_CONTAINER_TAG   = "clawnet-evidence"
-_LOCAL_SERVER    = "http://localhost:6767"
 
 # Verdict severity, unified across the network monitor (CRITICAL) and the
 # sandbox (DANGEROUS). Higher = worse.
@@ -158,30 +149,18 @@ def evidence_summary(ctx: dict) -> list[str]:
 
 
 class SuperMemory:
-    """Evidence store. JSONL is the deterministic source of truth; the local
-    Supermemory server is an optional semantic-search mirror."""
+    """Deterministic, append-only forensic evidence store."""
 
     def __init__(self, path: Optional[Path] = None) -> None:
         self._path   = path or _EVIDENCE_PATH
         self._recs: deque = deque(maxlen=_MAX_RECORDS)
         self._lock   = threading.Lock()
 
-        self._client = None
-        api_key = os.environ.get("SUPERMEMORY_API_KEY", "")
-        if _HAS_SDK and api_key:
-            try:
-                self._client = _SDK(
-                    api_key=api_key,
-                    base_url=os.environ.get("SUPERMEMORY_API_URL", _LOCAL_SERVER),
-                )
-            except Exception:
-                self._client = None
-
         self._load()
 
     @property
     def backend(self) -> str:
-        return "supermemory+jsonl" if self._client else "jsonl"
+        return "jsonl"
 
     # ── write (deterministic sources only) ─────────────────────────────────────
 
@@ -197,9 +176,6 @@ class SuperMemory:
                     f.write(json.dumps(record, ensure_ascii=False) + "\n")
             except Exception:
                 pass
-        if self._client:
-            threading.Thread(target=self._mirror, args=(record,), daemon=True).start()
-
     def store_event(self, event: dict) -> None:
         """Legacy entry point — projected into a full evidence record."""
         self.store_evidence(_event_to_evidence(event))
@@ -360,21 +336,6 @@ class SuperMemory:
         }
 
     # ── server mirror + load ───────────────────────────────────────────────────
-
-    def _mirror(self, rec: dict) -> None:
-        """Best-effort push to the local Supermemory server for semantic search."""
-        try:
-            self._client.add(
-                content=_record_to_text(rec),
-                container_tags=[_CONTAINER_TAG],
-                metadata={
-                    "verdict": rec.get("verdict", ""), "process": rec.get("process", ""),
-                    "sha256": rec.get("sha256", ""), "fingerprint": rec.get("fingerprint", ""),
-                    "kind": rec.get("kind", ""), "ts": rec.get("ts", ""),
-                },
-            )
-        except Exception:
-            pass
 
     def _load(self) -> None:
         try:

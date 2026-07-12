@@ -110,6 +110,7 @@ class Evidence:
     foreign:    bool = False
     listening:  bool = False
     prior:      dict = field(default_factory=dict)   # reputation memory hit
+    threat_intelligence: dict = field(default_factory=dict)
 
     def key(self) -> tuple:
         return (self.process, self.exe, self.remote, self.rport, self.status)
@@ -181,6 +182,22 @@ def collect(conn, *, geo: str = "", memory=None, deep: bool = False) -> Evidence
                 ev.prior = memory.risk_history_lookup(ip=ev.remote, process=ev.process) or {}
             except Exception:
                 ev.prior = {}
+        # Retrieval is performed before scoring, but scoring remains a pure
+        # function of this attached structured evidence.
+        try:
+            try:
+                from web_search import enrich_observables
+            except ImportError:
+                from core.web_search import enrich_observables  # type: ignore
+            threat = enrich_observables(
+                ips=[ev.remote] if ev.remote else [],
+                hashes=[ev.sha256] if ev.sha256 else [],
+                processes=[ev.process] if ev.process else [],
+            )
+            if threat.get("previous_evidence"):
+                ev.threat_intelligence = threat
+        except Exception:
+            pass
     return ev
 
 # ── rules ─────────────────────────────────────────────────────────────────────
@@ -247,6 +264,16 @@ def _rules(ev: Evidence) -> list[tuple[str, int, str]]:
         hits.append(("KNOWN_BAD", 3, f"Previously flagged CRITICAL ({ev.prior.get('hits')}x in 30d)"))
     elif worst == "SUSPICIOUS":
         hits.append(("KNOWN_SUSPICIOUS", 1, f"Previously flagged SUSPICIOUS ({ev.prior.get('hits')}x in 30d)"))
+
+    intel = ev.threat_intelligence or {}
+    reputations = intel.get("ioc_reputation") or []
+    known_bad = any(
+        entry.get("reputation") in ("malicious", "known_exploited")
+        for entry in reputations
+        if isinstance(entry, dict)
+    )
+    if known_bad:
+        hits.append(("THREAT_INTEL_IOC", 3, "Threat intelligence reports a matching malicious or exploited IOC"))
 
     return hits
 
@@ -428,6 +455,18 @@ def _behavior_rules(report: dict) -> list[tuple[str, int, str]]:
                      f"Outbound traffic to {len(ips)} external host(s): "
                      f"{', '.join(scrub(i, 45) for i in ips[:3])}"))
 
+    intel = report.get("threat_intelligence") or {}
+    reputations = intel.get("ioc_reputation") or []
+    reputation_values = {
+        entry.get("reputation", "") for entry in reputations if isinstance(entry, dict)
+    }
+    if "malicious" in reputation_values:
+        hits.append(("THREAT_INTEL_MALICIOUS_IOC", 45,
+                     "Threat intelligence reports a matching malicious IOC"))
+    elif "known_exploited" in reputation_values:
+        hits.append(("THREAT_INTEL_EXPLOITED_IOC", 35,
+                     "Threat intelligence reports a matching exploited IOC"))
+
     if report.get("exit_code") not in (0, None):
         hits.append(("NONZERO_EXIT", 5, f"Process exited with status {report.get('exit_code')}"))
     if report.get("timed_out"):
@@ -476,7 +515,7 @@ def llm_payload(ev: Evidence, v: Verdict) -> dict:
     Never include file contents, README/source text, stdout, or anything else
     an attacker controls the wording of.
     """
-    return {
+    payload = {
         "verdict":    v.level,          # already decided — the LLM cannot change it
         "score":      v.score,
         "confidence": v.confidence,
@@ -498,6 +537,48 @@ def llm_payload(ev: Evidence, v: Verdict) -> dict:
             "in_temp_path":    ev.suspicious_path,
             "prior_sightings": ev.prior or {},
         },
+    }
+    if ev.threat_intelligence:
+        payload["threat_intelligence"] = _llm_threat_evidence(ev.threat_intelligence)
+    return payload
+
+
+def _llm_threat_evidence(threat: dict) -> dict:
+    """Allow the explanation layer to see only normalized, bounded source facts."""
+    entries = []
+    for item in (threat.get("previous_evidence") or [])[:8]:
+        if not isinstance(item, dict):
+            continue
+        source = item.get("source") or {}
+        entries.append(
+            {
+                "cves": [scrub(cve, 24) for cve in (item.get("cves") or [])[:10]],
+                "ioc_reputation": scrub(item.get("ioc_reputation", ""), 32),
+                "cvss": item.get("cvss"),
+                "exploit_available": bool(item.get("exploit_available")),
+                "publication_date": scrub(item.get("publication_date", ""), 40),
+                "source": {
+                    "name": scrub(source.get("name", ""), 80),
+                    "url": scrub(source.get("url", ""), 160),
+                },
+                "summary": scrub(item.get("summary", ""), 260),
+            }
+        )
+    return {
+        "matching_cves": [scrub(cve, 24) for cve in (threat.get("matching_cves") or [])[:20]],
+        "ioc_reputation": [
+            {
+                "value": scrub(item.get("value", ""), 80),
+                "reputation": scrub(item.get("reputation", ""), 32),
+                "source": {
+                    "name": scrub((item.get("source") or {}).get("name", ""), 80),
+                    "url": scrub((item.get("source") or {}).get("url", ""), 160),
+                },
+            }
+            for item in (threat.get("ioc_reputation") or [])[:8]
+            if isinstance(item, dict)
+        ],
+        "evidence": entries,
     }
 
 # ── immutable decision log ────────────────────────────────────────────────────
