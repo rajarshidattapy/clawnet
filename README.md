@@ -4,13 +4,9 @@
 
 <p align="center"><img width="920" height="171" alt="ClawNet" src="" /></p>
 
-<p align="center">
-  <b>AI-powered runtime defense for hosts and containers.</b>
-</p>
-
 ---
 
-ClawNet is a terminal security platform built on one principle: **a deterministic policy engine makes every security decision, and the AI only explains it.** The LLM never decides whether something is safe — it reads the structured evidence the engine already scored and narrates the verdict in plain English. Same evidence in, same verdict out, every time.
+AI-powered network security terminal where a deterministic policy engine scores host traffic and sandboxed code into reproducible verdicts the AI only explains — real-time TCP/UDP monitor + Docker quarantine sandbox with behavioral telemetry, canary exfil detection, a human-gated chain of trust, forensic memory searchable via self-hosted Supermemory Local, Firecrawl threat intel, and a prompt-injection firewall.
 
 It has two defense layers:
 
