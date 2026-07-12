@@ -124,6 +124,16 @@ _BAD_PACKAGES = {
 }
 _THREAT_FEED_PATH = Path.home() / ".clawnet" / "threat_intel.json"
 
+# Quarantine lifecycle: the target is copied into an isolated staging area, the
+# sandbox runs against that copy (your working tree is never mounted into Docker),
+# and only a PASS + human approval copies the *vetted snapshot* out to the host
+# workspace. What you promote is byte-for-byte what was tested.
+_QUARANTINE_ROOT = Path.home() / ".clawnet" / "quarantine"
+
+
+def _host_workspace() -> Path:
+    return Path(os.environ.get("CLAWNET_HOST_WORKSPACE", str(Path.home() / "clawnet-workspace")))
+
 
 # ── Live sandbox monitor ──────────────────────────────────────────────────────
 
@@ -355,7 +365,7 @@ def _run_container_live(
 
 @dataclass
 class SandboxResult:
-    target: str
+    target: str            # original source identity (for reputation/memory)
     run_id: str
     sandbox_dir: str
     stdout_path: str
@@ -368,6 +378,7 @@ class SandboxResult:
     reasons: list[str]
     recommendation: str
     ai_reason: str = ""
+    workspace: str = ""    # the vetted quarantine snapshot promotion copies from
 
 
 def _docker_available() -> bool:
@@ -871,9 +882,9 @@ class SandboxRunner:
         force_network_mode: str = "",
         stream: bool = False,
     ) -> SandboxResult:
-        workspace = Path(target_path).resolve()
-        if not workspace.exists():
-            raise FileNotFoundError(f"Target path not found: {workspace}")
+        source = Path(target_path).resolve()
+        if not source.exists():
+            raise FileNotFoundError(f"Target path not found: {source}")
         if shutil.which("docker") is None:
             raise RuntimeError("Docker CLI not found in PATH.")
 
@@ -888,9 +899,10 @@ class SandboxRunner:
         policy = _load_policy()
         if force_network_mode in ("none", "bridge"):
             policy["network_mode"] = force_network_mode
-        fingerprint = self._fingerprint_target(workspace)
+        # Identity (for reputation/memory) is the ORIGINAL source, never the copy.
+        fingerprint = self._fingerprint_target(source)
         reputation = self._load_reputation()
-        rep_key = str(workspace).lower()
+        rep_key = str(source).lower()
         prior = reputation.get(rep_key, {})
 
         if (
@@ -900,9 +912,9 @@ class SandboxRunner:
             and prior.get("approved") is True
         ):
             meta = {
-                "target": str(workspace),
+                "target": str(source),
                 "run_id": run_id,
-                "runtime_command": runtime_command.strip() or _detect_start_command(workspace),
+                "runtime_command": runtime_command.strip() or _detect_start_command(source),
                 "exit_code": 0,
                 "timed_out": False,
                 "stdout_sha256": "",
@@ -921,7 +933,7 @@ class SandboxRunner:
             stderr_path.write_text("", encoding="utf-8")
             self._print_report(meta, stdout_path, stderr_path)
             return SandboxResult(
-                target=str(workspace),
+                target=str(source),
                 run_id=run_id,
                 sandbox_dir=str(sandbox_dir),
                 stdout_path=str(stdout_path),
@@ -934,17 +946,22 @@ class SandboxRunner:
                 reasons=["Trusted cache hit: unchanged fingerprint"],
                 recommendation="allow_promotion",
                 ai_reason=meta["ai_reason"],
+                workspace=str(source),   # unchanged & trusted — promote from source
             )
+
+        # Quarantine-in: copy the target into an isolated staging dir. Docker mounts
+        # THIS copy, never your working tree; a PASS + approval later copies it out.
+        workspace = self._stage_to_quarantine(source, run_id)
 
         user_command = runtime_command.strip() or _detect_start_command(workspace)
         container_name = f"clawnet-{run_id}"
 
         # A per-run canary. Planted as decoy credentials + env values inside the
-        # container; if this value ever leaves the process, it was stolen.
+        # container; if this value ever leaves the container, it was stolen.
         canary = (f"clawnet-canary-{secrets.token_hex(8)}"
                   if policy.get("plant_decoy_credentials", True) else "")
 
-        _write_agent_config(sandbox_dir, Path(target_path).name, canary)
+        _write_agent_config(sandbox_dir, source.name, canary)
         cmd = _build_run_cmd(
             str(policy.get("backend", "docker")),
             workspace, sandbox_dir, container_name, user_command, policy, canary,
@@ -954,7 +971,7 @@ class SandboxRunner:
         exit_code = 0
         if stream:
             live_view = _SandboxLiveView(
-                target=str(workspace),
+                target=str(source),
                 container_name=container_name,
                 command=user_command,
                 timeout_sec=int(policy.get("max_runtime_seconds", 300)),
@@ -1047,7 +1064,7 @@ class SandboxRunner:
             score = max(score, 80)
 
         # Reputation memory: a repo we already judged carries that judgement forward.
-        prior = self._prior_run(str(workspace))
+        prior = self._prior_run(str(source))
         if prior.get("worst") == "DANGEROUS":
             score = max(score, 80)
             reasons.append(f"Previously judged DANGEROUS ({prior['runs']} prior run(s))")
@@ -1070,7 +1087,7 @@ class SandboxRunner:
 
         runtime_meta = behavior
         meta = {
-            "target": str(workspace),
+            "target": str(source),
             "run_id": run_id,
             "runtime_command": user_command,
             "exit_code": exit_code,
@@ -1126,7 +1143,7 @@ class SandboxRunner:
         self._print_report(meta, stdout_path, stderr_path)
 
         return SandboxResult(
-            target=str(workspace),
+            target=str(source),
             run_id=run_id,
             sandbox_dir=str(sandbox_dir),
             stdout_path=str(stdout_path),
@@ -1139,6 +1156,7 @@ class SandboxRunner:
             reasons=reasons,
             recommendation=recommendation,
             ai_reason=ai_reason,
+            workspace=str(workspace),   # vetted quarantine snapshot to promote from
         )
 
     def chain_of_trust(self, result: SandboxResult) -> list[dict]:
@@ -1221,8 +1239,9 @@ class SandboxRunner:
 
         if blocked:
             console.print(
-                f"\n[bold red]Promotion blocked: {', '.join(s['step'] for s in blocked)} failed.[/bold red]"
+                f"\n[bold red]Promotion BLOCKED: {', '.join(s['step'] for s in blocked)} failed.[/bold red]"
             )
+            console.print(f"[yellow]Left in quarantine (nothing reached your host):[/yellow] {result.workspace}")
             self._update_reputation(result, approved=False)
             policy_engine.log_decision(
                 "sandbox_promotion", target=result.target, approved=False,
@@ -1232,7 +1251,7 @@ class SandboxRunner:
 
         # Human approval is the last link of the chain — always, even for SAFE.
         if result.risk_level == "SAFE":
-            console.print("\n[bold green]✓ Sandbox Passed   ✓ Safe to Promote[/bold green]")
+            console.print("\n[bold green]Sandbox Passed - Safe to Promote[/bold green]")
         else:
             console.print(
                 f"\n[bold yellow]Verdict is {result.risk_level} — review the evidence above "
@@ -1241,9 +1260,18 @@ class SandboxRunner:
         approved = self._human_approval(result)
 
         self._update_reputation(result, approved=approved)
+        promoted_to = None
+        if approved:
+            promoted_to = self.promote_to_host(result)
+            if promoted_to:
+                console.print(f"[bold green]Promoted to host:[/bold green] {promoted_to}")
+        else:
+            console.print(f"[yellow]Left in quarantine (not promoted):[/yellow] {result.workspace}")
+
         policy_engine.log_decision(
             "sandbox_promotion", target=result.target, approved=approved,
             level=result.risk_level, score=result.risk_score,
+            promoted_to=str(promoted_to) if promoted_to else "",
             chain=[{"step": s["step"], "ok": s["ok"]} for s in steps],
         )
         return approved
@@ -1292,6 +1320,49 @@ class SandboxRunner:
                     return False
             time.sleep(2)
         return None
+
+    def _stage_to_quarantine(self, source: Path, run_id: str) -> Path:
+        """Copy the target into an isolated staging dir under ~/.clawnet/quarantine.
+
+        The sandbox runs against this copy, so your working tree is never mounted
+        into Docker and what you later promote is exactly what was tested.
+        ponytail: full copy incl. .git (needed for signature verify). A giant
+        node_modules is copied verbatim — add an ignore list if that ever hurts.
+        """
+        dest = _QUARANTINE_ROOT / run_id
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        if source.is_dir():
+            shutil.copytree(source, dest)
+        else:
+            dest.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, dest / source.name)
+        return dest
+
+    def promote_to_host(self, result: SandboxResult) -> Optional[Path]:
+        """Copy the vetted snapshot out to the host workspace. Called only on approval.
+
+        Destination: $CLAWNET_HOST_WORKSPACE (default ~/clawnet-workspace). Never
+        writes back into your original working tree.
+        """
+        src = Path(result.workspace or "")
+        if not src.exists():
+            console.print("[red]Nothing to promote — quarantine snapshot is missing.[/red]")
+            return None
+        dest_root = _host_workspace()
+        name = Path(result.target).name or f"promoted-{result.run_id}"
+        dest = dest_root / name
+        if dest.exists():                      # don't clobber a previous promotion
+            dest = dest_root / f"{name}-{result.run_id}"
+        try:
+            dest_root.mkdir(parents=True, exist_ok=True)
+            if src.is_dir():
+                shutil.copytree(src, dest)
+            else:
+                shutil.copy2(src, dest)
+        except Exception as exc:
+            console.print(f"[red]Promotion copy failed:[/red] {exc}")
+            return None
+        return dest
 
     def _fingerprint_target(self, workspace: Path) -> str:
         """Compute a stable lightweight fingerprint for trust cache decisions."""
