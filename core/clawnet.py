@@ -82,13 +82,14 @@ except ImportError:
         PendingAction = None  # type: ignore
 
 try:
-    from memory import SuperMemory, make_event
+    from memory import SuperMemory, make_event, make_evidence
 except ImportError:
     try:
-        from core.memory import SuperMemory, make_event
+        from core.memory import SuperMemory, make_event, make_evidence
     except ImportError:
-        SuperMemory = None  # type: ignore
-        make_event  = None  # type: ignore
+        SuperMemory  = None  # type: ignore
+        make_event   = None  # type: ignore
+        make_evidence = None  # type: ignore
 
 try:
     import policy
@@ -950,7 +951,40 @@ def maybe_request_analysis(connections: list, new_keys: set, oc) -> None:
         ev, v = verdict_for(conn)
         if ck not in new_keys and v.level == "SAFE":
             continue
+        _persist_verdict(ck, ev, v)
         oc.request(ck, ev, v)
+
+
+_persisted_keys: set = set()
+_persist_lock = threading.Lock()
+
+
+def _persist_verdict(ck: tuple, ev, v) -> None:
+    """Write the deterministic verdict to evidence memory, once per connection.
+
+    This is the memory *write* site — deterministic, not OpenClaw. Only flagged
+    verdicts are worth keeping as forensic evidence.
+    """
+    mem = _memory_ref[0]
+    if mem is None or make_evidence is None or v.level not in ("SUSPICIOUS", "CRITICAL"):
+        return
+    with _persist_lock:
+        if ck in _persisted_keys:
+            return
+        _persisted_keys.add(ck)
+    try:
+        mem.store_evidence(make_evidence(
+            kind="network", source="policy-engine",
+            sha256=getattr(ev, "sha256", ""), exe=getattr(ev, "exe", ""),
+            process=getattr(ev, "process", ""), parent=getattr(ev, "parent", ""),
+            remote_ips=[ev.remote] if getattr(ev, "remote", "") else [],
+            ports=[ev.rport] if getattr(ev, "rport", 0) else [],
+            network_behavior=[r[0] for r in v.rules],
+            policy_rules=[r[0] for r in v.rules],
+            risk_score=v.score, verdict=v.level,
+        ))
+    except Exception:
+        pass
 
 # ── UI panels ─────────────────────────────────────────────────────────────────
 

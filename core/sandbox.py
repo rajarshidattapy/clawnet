@@ -34,9 +34,9 @@ except ImportError:
     _openai = None
 
 try:
-    from memory import SuperMemory, make_event
+    from memory import SuperMemory, make_event, make_evidence, behavior_fingerprint
 except ImportError:
-    from core.memory import SuperMemory, make_event
+    from core.memory import SuperMemory, make_event, make_evidence, behavior_fingerprint
 
 try:
     from telegram_alert import TelegramAlert
@@ -707,6 +707,40 @@ def _threat_intel_lookup(ips: list[str], packages: list[str]) -> tuple[list[str]
     return hits, True
 
 
+def _behavior_to_fp_record(behavior: dict) -> dict:
+    """Shape a container behavior report into the fields behavior_fingerprint reads."""
+    return {
+        "process_tree":     behavior.get("lineage", []),
+        "processes":        behavior.get("processes", []),
+        "network_behavior": behavior.get("signals", []),
+        "file_access":      behavior.get("file_access", []),
+        "persistence":      behavior.get("persistence", []),
+        "dependencies":     behavior.get("installs", []),
+    }
+
+
+def _meta_to_evidence(meta: dict) -> dict:
+    """Full forensic evidence record from a sandbox run's metadata (req 1, 2)."""
+    behavior = meta.get("behavior") or {}
+    sig      = meta.get("signature") or {}
+    return make_evidence(
+        kind="sandbox", source="sandbox-runtime",
+        process="sandbox-runtime", repository=str(meta.get("target", "")),
+        process_tree=behavior.get("lineage", []),
+        processes=behavior.get("processes", []),
+        remote_ips=meta.get("foreign_egress_ips", []),
+        network_behavior=behavior.get("signals", []),
+        file_access=behavior.get("file_access", []),
+        persistence=behavior.get("persistence", []),
+        dependencies=behavior.get("installs", []),
+        signature={"verified": bool(sig.get("verified")), "detail": sig.get("detail", "")},
+        policy_rules=[r.get("id") for r in meta.get("behavior_rules", [])],
+        risk_score=int(meta.get("risk_score", 0) or 0),
+        verdict=meta.get("risk_level", "?"),
+        fingerprint=behavior_fingerprint(_behavior_to_fp_record(behavior)),
+    )
+
+
 def _verify_signature(workspace: Path) -> tuple[bool, str]:
     """Is the HEAD commit signed and does the signature verify?"""
     if not (workspace / ".git").exists():
@@ -1071,6 +1105,24 @@ class SandboxRunner:
         elif prior.get("worst") == "SUSPICIOUS":
             score = min(100, score + 10)
             reasons.append(f"Previously judged SUSPICIOUS ({prior['runs']} prior run(s))")
+
+        # Behavioral memory: the same behavior seen before under ANY filename/repo.
+        # This catches malware that was simply renamed between runs (req 5, 6, 9).
+        fp = behavior_fingerprint(_behavior_to_fp_record(behavior))
+        if self._mem is not None:
+            try:
+                hist = self._mem.historical_context(
+                    fingerprint=fp, ips=foreign_ips, repository=str(source))
+            except Exception:
+                hist = {}
+            if hist.get("fingerprint_match") and hist.get("worst_verdict") == "DANGEROUS":
+                score = max(score, 80)
+                reasons.append(
+                    f"Behavioral fingerprint matches a prior DANGEROUS run "
+                    f"(seen {hist['seen_count']}x, first {hist['first_seen']})")
+            elif hist.get("seen_count"):
+                reasons.append(f"Behavior seen {hist['seen_count']}x before "
+                               f"(worst: {hist.get('worst_verdict') or 'SAFE'})")
 
         score = min(100, score)
         level = _score_to_level(score)
@@ -1480,19 +1532,11 @@ class SandboxRunner:
         self._save_reputation(rep)
 
     def _store_memory(self, meta: dict) -> None:
+        """Persist the whole run as a forensic evidence snapshot (req 1, 2)."""
         if not self._mem:
             return
         try:
-            event = make_event(
-                level=meta.get("risk_level", "SUSPICIOUS"),
-                reason=(meta.get("ai_reason") or "; ".join(meta.get("reasons", [])[:2]) or "sandbox analysis"),
-                action=meta.get("recommendation", "manual_review"),
-                process="sandbox-runtime",
-                remote_ip="",
-                port=0,
-                exe=meta.get("target", ""),
-            )
-            self._mem.store_event(event)
+            self._mem.store_evidence(_meta_to_evidence(meta))
         except Exception:
             pass
 
