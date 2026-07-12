@@ -9,6 +9,7 @@ import ipaddress
 import json
 import os
 import re
+import secrets
 import shutil
 import subprocess
 import tempfile
@@ -90,6 +91,15 @@ _DEFAULT_POLICY: dict[str, Any] = {
     "telemetry_interval_seconds": 2,
     "block_on_foreign_egress": True,
     "foreign_egress_risk_bonus": 30,
+    # ── hardening ────────────────────────────────────────────────────────────
+    "backend": "docker",          # see _BACKENDS — gVisor/Kata just set `runtime`
+    "runtime": "",                # "" = default runc | "runsc" = gVisor | "kata-runtime"
+    "read_only_rootfs": False,    # True breaks in-container pip/npm installs
+    "seccomp_profile": "",        # "" = Docker's default profile (already blocks ptrace/mount/kexec)
+    "apparmor_profile": "",       # e.g. "docker-default" — Linux hosts only, errors elsewhere
+    "no_swap": True,
+    "plant_decoy_credentials": True,
+    "require_signature": False,   # chain of trust: fail unsigned repos outright
     "deny_env_keys": [
         "OPENAI_API_KEY",
         "SUPERMEMORY_API_KEY",
@@ -98,7 +108,21 @@ _DEFAULT_POLICY: dict[str, Any] = {
         "AWS_SECRET_ACCESS_KEY",
         "GITHUB_TOKEN",
     ],
+    # Handed to the container as *canary* values instead of being left empty, so
+    # theft is detectable. Never real secrets.
+    "canary_env_keys": [
+        "AWS_SECRET_ACCESS_KEY", "GITHUB_TOKEN", "OPENAI_API_KEY", "NPM_TOKEN",
+    ],
 }
+
+# Known-malicious / typosquat package names. Small, offline, honest.
+# ponytail: a static list, not a live feed. Point THREAT_FEED_PATH at a real feed if you have one.
+_BAD_PACKAGES = {
+    "colourama", "crossenv", "python3-dateutil", "jeIlyfish", "libpeshnx",
+    "request", "urllib", "discord.py-self", "node-ipc", "event-stream",
+    "flatmap-stream", "eslint-scope", "ua-parser-js", "coa", "rc",
+}
+_THREAT_FEED_PATH = Path.home() / ".clawnet" / "threat_intel.json"
 
 
 # ── Live sandbox monitor ──────────────────────────────────────────────────────
@@ -118,6 +142,37 @@ class _SandboxLiveView:
         self._score = 0
         self._done = False
         self._lock = threading.Lock()
+        # Lifecycle checklist — lit as evidence arrives (see mark_stage / alert tags).
+        self._stages: dict[str, bool] = {
+            "Container Created":        False,
+            "Sandbox Started":          False,
+            "Collecting Process Tree":  False,
+            "Monitoring Installation":  False,
+            "Monitoring Install Scripts": False,
+            "Monitoring Filesystem":    False,
+            "Monitoring Network":       False,
+            "Monitoring Persistence":   False,
+        }
+
+    # Which live-alert tag lights which stage.
+    _STAGE_FOR_TAG = {
+        "INSTALL":      "Monitoring Installation",
+        "INSTALL_EXEC": "Monitoring Install Scripts",
+        "DECOY_READ":   "Monitoring Filesystem",
+        "SENSITIVE":    "Monitoring Filesystem",
+        "FOREIGN_IP":   "Monitoring Network",
+        "PERSISTENCE":  "Monitoring Persistence",
+    }
+
+    def mark_stage(self, name: str) -> None:
+        with self._lock:
+            if name in self._stages:
+                self._stages[name] = True
+
+    def mark_stage_for_tag(self, tag: str) -> None:
+        stage = self._STAGE_FOR_TAG.get(tag)
+        if stage:
+            self.mark_stage(stage)
 
     @property
     def live_score(self) -> int:
@@ -135,6 +190,7 @@ class _SandboxLiveView:
 
     def ingest_line(self, line: str) -> None:
         stripped = line.rstrip()
+        self.mark_stage("Collecting Process Tree")   # first output => container is live
         with self._lock:
             self._tail.append(stripped)
             for pattern, (reason, delta) in _SUSPICIOUS_PATTERNS.items():
@@ -158,9 +214,15 @@ class _SandboxLiveView:
             signals = list(self._signals)
             egress = sorted(self._egress)
             score = self._score
+            stages = list(self._stages.items())
 
         level = "SAFE" if score < 35 else ("SUSPICIOUS" if score < 70 else "DANGEROUS")
         level_color = {"SAFE": "green", "SUSPICIOUS": "yellow", "DANGEROUS": "red"}[level]
+
+        stage_lines = "  ".join(
+            f"[green][x][/green] {name}" if done else f"[dim][ ] {name}[/dim]"
+            for name, done in stages
+        )
 
         meta_grid = Table.grid(padding=(0, 2))
         meta_grid.add_column(style="cyan")
@@ -183,7 +245,13 @@ class _SandboxLiveView:
             style="dim",
             no_wrap=False,
         )
-        return Group(meta_grid, Rule(style="dim"), output_block)
+        return Group(
+            meta_grid,
+            Rule(style="dim"),
+            Text.from_markup(stage_lines),
+            Rule(style="dim"),
+            output_block,
+        )
 
 
 def _run_container_live(
@@ -210,6 +278,9 @@ def _run_container_live(
         stderr_path.write_text("", encoding="utf-8")
         return 1, False
 
+    live_view.mark_stage("Container Created")
+    live_view.mark_stage("Sandbox Started")
+
     stdout_buf = io.BytesIO()
 
     def _drain() -> None:
@@ -234,6 +305,8 @@ def _run_container_live(
                         last_alert_size = size
                         for line in alert_log.read_text(errors="replace").splitlines():
                             parts = line.split()
+                            if len(parts) >= 2:
+                                live_view.mark_stage_for_tag(parts[1])
                             if len(parts) >= 3 and parts[1] == "FOREIGN_IP":
                                 live_view.add_egress(parts[2])
                 # fallback: also parse net-sample.log if agent isn't running
@@ -297,6 +370,17 @@ class SandboxResult:
     ai_reason: str = ""
 
 
+def _docker_available() -> bool:
+    """True only if the Docker CLI is present AND the daemon answers."""
+    if shutil.which("docker") is None:
+        return False
+    try:
+        return subprocess.run(["docker", "info"], capture_output=True,
+                              timeout=10).returncode == 0
+    except Exception:
+        return False
+
+
 def _safe_read(path: Path, limit: int = _MAX_LOG_BYTES) -> str:
     try:
         with path.open("rb") as f:
@@ -333,13 +417,14 @@ def _agent_path() -> Path:
     return Path(__file__).with_name("container_agent.py")
 
 
-def _write_agent_config(sandbox_dir: Path, target_name: str) -> Path:
-    """Write Telegram creds + target name to a config file the agent reads inside the container."""
-    cfg = {
-        "telegram_token": os.environ.get("TELEGRAM_BOT_TOKEN", ""),
-        "telegram_chat_id": os.environ.get("TELEGRAM_CHAT_ID", ""),
-        "target_name": target_name,
-    }
+def _write_agent_config(sandbox_dir: Path, target_name: str, canary: str) -> Path:
+    """Config for the in-container agent.
+
+    Deliberately holds NO credentials. The agent used to be handed the Telegram
+    bot token, which any sandboxed app could simply read out of this file — the
+    agent now writes findings to live-alerts.log and the host raises the alerts.
+    """
+    cfg = {"target_name": target_name, "canary": canary}
     cfg_path = sandbox_dir / "agent-config.json"
     cfg_path.write_text(json.dumps(cfg), encoding="utf-8")
     return cfg_path
@@ -351,25 +436,32 @@ def _build_agent_docker_cmd(
     container_name: str,
     user_command: str,
     policy: dict,
+    canary: str = "",
 ) -> list[str]:
-    """Build docker run command that mounts and runs the ClawNet agent inside the container.
+    """Build the hardened `docker run` for a sandbox run.
 
-    The agent (container_agent.py) supervises the target app, monitors /proc/net in
-    real time, and fires Telegram pings on any new foreign IP or suspicious signal.
-    The workspace is still mounted read-only; we skip --read-only on the root fs so
-    that pip/npm installs inside the container can succeed.
+    Containment, in layers: all capabilities dropped, no-new-privileges (so setuid
+    binaries cannot regain them), Docker's seccomp profile (blocks ptrace/mount/
+    kexec/bpf), CPU/RAM/PID/file limits, swap disabled, a read-only workspace, and
+    tmpfs for every writable path so nothing survives the run. The host filesystem,
+    the Docker socket and host env vars are never mounted or forwarded.
     """
-    agent_src = _agent_path()
+    agent_src   = _agent_path()
     config_path = sandbox_dir / "agent-config.json"
 
     cmd = [
         "docker", "run", "--rm",
         "--name", container_name,
+        # resource limits — a fork bomb or a miner cannot take the host with it
         "--cpus", str(policy.get("cpu_limit", "1.5")),
         "--memory", str(policy.get("memory_limit", "1536m")),
         "--pids-limit", str(policy.get("pids_limit", 256)),
+        "--ulimit", "nofile=512:1024",
+        "--ulimit", "core=0",
+        # privilege containment
         "--cap-drop", "ALL",
         "--security-opt", "no-new-privileges",
+        # isolation
         "--network", str(policy.get("network_mode", "bridge")),
         "--tmpfs", "/tmp:rw,nosuid,nodev,size=128m",
         "--tmpfs", "/run:rw,nosuid,nodev,size=16m",
@@ -384,14 +476,46 @@ def _build_agent_docker_cmd(
         "-w", "/workspace",
         "--pull", "missing",
     ]
-    # Blank out any sensitive host env vars so the target app cannot read them
+
+    if policy.get("no_swap", True):
+        # swap == memory means the memory cap cannot be dodged by swapping
+        cmd += ["--memory-swap", str(policy.get("memory_limit", "1536m"))]
+    if policy.get("read_only_rootfs", False):
+        cmd += ["--read-only"]
+    if policy.get("runtime"):
+        # gVisor ("runsc") / Kata slot in here — nothing else in ClawNet changes.
+        cmd += ["--runtime", str(policy["runtime"])]
+    if policy.get("seccomp_profile"):
+        cmd += ["--security-opt", f"seccomp={policy['seccomp_profile']}"]
+    if policy.get("apparmor_profile"):
+        cmd += ["--security-opt", f"apparmor={policy['apparmor_profile']}"]
+
+    # Secret isolation. Host env vars are never forwarded by docker run, but the
+    # target may *expect* these names — so hand it canaries (theft is detectable)
+    # and blank everything else on the denylist.
+    canary_keys = set(policy.get("canary_env_keys", [])) if canary else set()
     for key in policy.get("deny_env_keys", []):
-        cmd.extend(["-e", f"{key}="])
-    cmd.extend([
-        _DEFAULT_IMAGE,
-        "python", "/clawnet-agent/agent.py", user_command,
-    ])
+        if key in canary_keys:
+            continue
+        cmd += ["-e", f"{key}="]
+    for key in canary_keys:
+        cmd += ["-e", f"{key}={canary}"]
+
+    cmd += [_DEFAULT_IMAGE, "python", "/clawnet-agent/agent.py", user_command]
     return cmd
+
+
+# Sandbox backends. Docker covers gVisor and Kata too (they are OCI runtimes —
+# set policy["runtime"]). A genuinely different backend (Windows Sandbox,
+# Firecracker) registers its own command builder here and nothing else changes.
+_BACKENDS: dict[str, Any] = {"docker": _build_agent_docker_cmd}
+
+
+def _build_run_cmd(backend: str, *args, **kwargs) -> list[str]:
+    builder = _BACKENDS.get(backend)
+    if builder is None:
+        raise RuntimeError(f"Unknown sandbox backend '{backend}'. Known: {sorted(_BACKENDS)}")
+    return builder(*args, **kwargs)
 
 
 def _load_policy() -> dict[str, Any]:
@@ -490,6 +614,160 @@ def _heuristic_risk(stdout: str, stderr: str, metadata: dict) -> tuple[int, list
         reasons.append(f"Observed foreign egress IPs: {', '.join(foreign_ips[:3])}")
     score = min(100, score)
     return score, reasons
+
+
+def _build_sbom(workspace: Path, behavior: dict) -> dict:
+    """Declared dependencies (from manifests) vs. what actually got installed.
+
+    A package that shows up at install time but is in no manifest is the
+    interesting case — that is how a malicious transitive dep hides.
+    """
+    declared: dict[str, list[str]] = {}
+
+    req = workspace / "requirements.txt"
+    if req.exists():
+        declared["pip"] = [
+            re.split(r"[=<>!~\[ ]", ln.strip())[0]
+            for ln in _safe_read(req).splitlines()
+            if ln.strip() and not ln.strip().startswith("#")
+        ]
+    pkg = workspace / "package.json"
+    if pkg.exists():
+        try:
+            data = json.loads(_safe_read(pkg))
+            declared["npm"] = sorted(
+                list((data.get("dependencies") or {}).keys())
+                + list((data.get("devDependencies") or {}).keys())
+            )
+        except Exception:
+            pass
+    if (workspace / "Cargo.toml").exists():
+        declared["cargo"] = re.findall(r"(?m)^([A-Za-z0-9_-]+)\s*=", _safe_read(workspace / "Cargo.toml"))
+    if (workspace / "go.mod").exists():
+        declared["go"] = re.findall(r"(?m)^\s+([\w./-]+)\s+v", _safe_read(workspace / "go.mod"))
+
+    installed: list[str] = []
+    for entry in (behavior.get("installs") or []):
+        installed.extend(entry.get("packages") or [])
+    installed = sorted({p for p in installed if p})
+
+    all_declared = {p.lower() for pkgs in declared.values() for p in pkgs}
+    undeclared   = sorted(p for p in installed if p.lower() not in all_declared)
+
+    return {
+        "declared": declared,
+        "installed_at_runtime": installed,
+        "undeclared": undeclared,
+        "declared_count": sum(len(v) for v in declared.values()),
+    }
+
+
+def _scan_dependencies(sbom: dict) -> list[str]:
+    """Offline dependency scan: known-bad names, plus anything installed but undeclared."""
+    findings: list[str] = []
+    candidates = set(sbom.get("installed_at_runtime", []))
+    for pkgs in sbom.get("declared", {}).values():
+        candidates.update(pkgs)
+    for pkg in sorted(candidates):
+        if pkg.lower() in _BAD_PACKAGES:
+            findings.append(f"Known-malicious package: {pkg}")
+    for pkg in sbom.get("undeclared", []):
+        findings.append(f"Installed but not in any manifest: {pkg}")
+    return findings
+
+
+def _threat_intel_lookup(ips: list[str], packages: list[str]) -> tuple[list[str], bool]:
+    """Check egress IPs / packages against a local feed. Offline by design.
+
+    Feed format (~/.clawnet/threat_intel.json):
+        {"ips": ["1.2.3.4"], "packages": ["evil-pkg"], "domains": []}
+    Returns (hits, feed_available).
+    """
+    if not _THREAT_FEED_PATH.exists():
+        return [], False
+    try:
+        feed = json.loads(_THREAT_FEED_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return [], False
+    bad_ips  = {str(x) for x in feed.get("ips", [])}
+    bad_pkgs = {str(x).lower() for x in feed.get("packages", [])}
+    hits  = [f"Egress IP on threat feed: {ip}" for ip in ips if ip in bad_ips]
+    hits += [f"Package on threat feed: {p}" for p in packages if p.lower() in bad_pkgs]
+    return hits, True
+
+
+def _verify_signature(workspace: Path) -> tuple[bool, str]:
+    """Is the HEAD commit signed and does the signature verify?"""
+    if not (workspace / ".git").exists():
+        return False, "not a git repository — no signature to verify"
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(workspace), "verify-commit", "HEAD"],
+            capture_output=True, text=True, timeout=15,
+        )
+        if proc.returncode == 0:
+            return True, "HEAD commit signature verified"
+        return False, "HEAD commit is unsigned or the signature does not verify"
+    except FileNotFoundError:
+        return False, "git not installed — cannot verify"
+    except Exception as exc:
+        return False, f"signature check failed: {exc}"
+
+
+def behavior_summary(meta: dict) -> Panel:
+    """Human-readable behavioral evidence: what it ran, installed, touched, changed."""
+    b     = meta.get("behavior") or {}
+    sbom  = meta.get("sbom") or {}
+    lines: list[str] = []
+
+    for rule in (meta.get("behavior_rules") or [])[:8]:
+        lines.append(f"[red]+{rule['points']:<3}[/red] [bold]{rule['id']}[/bold]  {rule['detail']}")
+    if lines:
+        lines.append("")
+
+    lineage = b.get("lineage") or []
+    if lineage:
+        lines.append("[bold cyan]PROCESS LINEAGE[/bold cyan]")
+        lines += [f"  {chain}" for chain in lineage[:6]]
+
+    installs = b.get("installs") or []
+    if installs:
+        lines.append("[bold cyan]INSTALLS[/bold cyan]")
+        for i in installs[:5]:
+            pkgs = ", ".join(i.get("packages", [])[:6]) or "(no explicit packages)"
+            lines.append(f"  [{i.get('manager')}] {pkgs}")
+    if sbom.get("undeclared"):
+        lines.append(f"  [yellow]undeclared: {', '.join(sbom['undeclared'][:6])}[/yellow]")
+
+    for ev in (b.get("install_exec") or [])[:4]:
+        lines.append(f"[yellow]  install-time exec: {ev.get('installer')} -> {ev.get('executed', '')[:60]}[/yellow]")
+
+    files = b.get("file_access") or []
+    if files or b.get("decoys_read"):
+        lines.append("[bold cyan]SENSITIVE FILE ACCESS[/bold cyan]")
+        for f in files[:6]:
+            lines.append(f"  [{f.get('category')}] {f.get('path')}")
+        for d in (b.get("decoys_read") or [])[:4]:
+            lines.append(f"  [bold red]DECOY READ: {d}[/bold red]")
+    if b.get("canary_leaked"):
+        lines.append("  [bold red]CANARY EXFIL: a planted secret left the process[/bold red]")
+
+    if b.get("persistence"):
+        lines.append("[bold cyan]PERSISTENCE[/bold cyan]")
+        lines += [f"  [red]{p}[/red]" for p in b["persistence"][:5]]
+    if b.get("escalation"):
+        lines.append("[bold cyan]PRIVILEGE ESCALATION[/bold cyan]")
+        lines += [f"  [red]{e}[/red]" for e in b["escalation"][:3]]
+    if b.get("foreign_ips"):
+        lines.append(f"[bold cyan]EGRESS[/bold cyan]  {', '.join(b['foreign_ips'][:6])}")
+
+    if not lines:
+        lines = ["[dim]No behavioral signals observed.[/dim]"]
+
+    level  = meta.get("risk_level", "SAFE")
+    border = {"DANGEROUS": "red", "SUSPICIOUS": "yellow"}.get(level, "green")
+    return Panel("\n".join(lines), title="[bold]Behavioral Evidence[/bold]",
+                 border_style=border, padding=(0, 1))
 
 
 def _score_to_level(score: int) -> str:
@@ -661,9 +939,16 @@ class SandboxRunner:
         user_command = runtime_command.strip() or _detect_start_command(workspace)
         container_name = f"clawnet-{run_id}"
 
-        # Write Telegram config so the agent can ping from inside the container
-        _write_agent_config(sandbox_dir, Path(target_path).name)
-        cmd = _build_agent_docker_cmd(workspace, sandbox_dir, container_name, user_command, policy)
+        # A per-run canary. Planted as decoy credentials + env values inside the
+        # container; if this value ever leaves the process, it was stolen.
+        canary = (f"clawnet-canary-{secrets.token_hex(8)}"
+                  if policy.get("plant_decoy_credentials", True) else "")
+
+        _write_agent_config(sandbox_dir, Path(target_path).name, canary)
+        cmd = _build_run_cmd(
+            str(policy.get("backend", "docker")),
+            workspace, sandbox_dir, container_name, user_command, policy, canary,
+        )
 
         timed_out = False
         exit_code = 0
@@ -708,38 +993,82 @@ class SandboxRunner:
         stdout = _safe_read(stdout_path)
         stderr = _safe_read(stderr_path)
 
-        # Prefer agent-meta.json (written by the in-container agent)
-        agent_meta: dict = {}
-        agent_meta_path = sandbox_dir / "agent-meta.json"
+        # The behavior report written by the in-container agent — the primary evidence.
+        behavior: dict = {}
+        behavior_path = sandbox_dir / "behavior.json"
         try:
-            if agent_meta_path.exists():
-                agent_meta = json.loads(agent_meta_path.read_text(encoding="utf-8"))
+            if behavior_path.exists():
+                behavior = json.loads(behavior_path.read_text(encoding="utf-8"))
         except Exception:
             pass
 
         # Fallback: parse net-sample.log for foreign IPs (legacy path)
-        net_sample = _safe_read(net_sample_path)
-        legacy_ips = _extract_foreign_ips_from_proc_net(net_sample)
+        legacy_ips  = _extract_foreign_ips_from_proc_net(_safe_read(net_sample_path))
+        foreign_ips = sorted(set(behavior.get("foreign_ips", [])) | set(legacy_ips))
 
-        # Merge: agent-detected IPs take priority, union with legacy
-        agent_ips: list = agent_meta.get("foreign_ips", [])
-        foreign_ips = sorted(set(agent_ips) | set(legacy_ips))
-
-        # Agent signals are pre-scored; we'll merge them in after heuristic scan
-        agent_signals: list = agent_meta.get("signals", [])
-        agent_score: int = int(agent_meta.get("risk_score", 0))
-
-        # Parse live-alerts.log for additional IPs captured mid-run
+        # Anything the agent flagged mid-run (the host, not the container, alerts)
         live_alert_log = sandbox_dir / "live-alerts.log"
         if live_alert_log.exists():
             for line in _safe_read(live_alert_log).splitlines():
                 parts = line.split()
-                if len(parts) >= 3 and parts[1] == "FOREIGN_IP":
-                    ip = parts[2]
-                    if ip not in foreign_ips:
-                        foreign_ips.append(ip)
+                if len(parts) >= 3 and parts[1] == "FOREIGN_IP" and parts[2] not in foreign_ips:
+                    foreign_ips.append(parts[2])
 
-        runtime_meta = agent_meta  # expose agent meta as runtime_meta
+        behavior["foreign_ips"] = foreign_ips
+        behavior["exit_code"]   = exit_code
+        behavior["timed_out"]   = timed_out
+
+        # ── deterministic verdict from observed behavior ──────────────────────
+        verdict = policy_engine.evaluate_behavior(behavior)
+        score   = verdict.score
+        reasons = [desc for _, _, desc in verdict.rules]
+
+        # Output-text heuristics remain a secondary signal source (the agent cannot
+        # see everything); they can raise the score but never lower it.
+        text_score, text_reasons = _heuristic_risk(stdout, stderr,
+                                                   {"exit_code": exit_code, "timed_out": timed_out})
+        if text_score > score:
+            score = text_score
+        for r in text_reasons:
+            if r not in reasons:
+                reasons.append(r)
+
+        # Supply chain: what was declared, what actually got installed.
+        sbom          = _build_sbom(workspace, behavior)
+        dep_findings  = _scan_dependencies(sbom)
+        all_pkgs      = sbom["installed_at_runtime"] + [
+            p for pkgs in sbom["declared"].values() for p in pkgs
+        ]
+        intel_hits, intel_available = _threat_intel_lookup(foreign_ips, all_pkgs)
+        for f in dep_findings + intel_hits:
+            if f not in reasons:
+                reasons.append(f)
+        if any("Known-malicious" in f for f in dep_findings) or intel_hits:
+            score = max(score, 80)
+
+        # Reputation memory: a repo we already judged carries that judgement forward.
+        prior = self._prior_run(str(workspace))
+        if prior.get("worst") == "DANGEROUS":
+            score = max(score, 80)
+            reasons.append(f"Previously judged DANGEROUS ({prior['runs']} prior run(s))")
+        elif prior.get("worst") == "SUSPICIOUS":
+            score = min(100, score + 10)
+            reasons.append(f"Previously judged SUSPICIOUS ({prior['runs']} prior run(s))")
+
+        score = min(100, score)
+        level = _score_to_level(score)
+
+        if policy.get("block_on_foreign_egress", True) and foreign_ips:
+            if level == "SAFE":
+                level = "SUSPICIOUS"
+            if len(foreign_ips) >= 3:
+                level = "DANGEROUS"
+            if "Foreign outbound egress observed during sandbox runtime" not in reasons:
+                reasons.append("Foreign outbound egress observed during sandbox runtime")
+
+        signed, sig_detail = _verify_signature(workspace)
+
+        runtime_meta = behavior
         meta = {
             "target": str(workspace),
             "run_id": run_id,
@@ -754,41 +1083,22 @@ class SandboxRunner:
             "policy": policy,
             "foreign_egress_ips": foreign_ips,
             "foreign_egress_bonus": int(policy.get("foreign_egress_risk_bonus", 30)),
-            "agent_signals": agent_signals,
-            "agent_score": agent_score,
+            "behavior": behavior,
+            "behavior_rules": [{"id": r[0], "points": r[1], "detail": r[2]} for r in verdict.rules],
+            "behavior_confidence": verdict.confidence,
+            "sbom": sbom,
+            "dependency_findings": dep_findings,
+            "threat_intel": {"hits": intel_hits, "feed_available": intel_available},
+            "signature": {"verified": signed, "detail": sig_detail},
+            "agent_signals": behavior.get("signals", []),
             "telemetry_paths": {
+                "behavior": str(behavior_path),
                 "proc_sample": str(proc_sample_path),
                 "net_sample": str(net_sample_path),
-                "agent_meta": str(agent_meta_path),
                 "live_alerts": str(live_alert_log),
             },
             "runtime_meta": runtime_meta,
         }
-        score, reasons = _heuristic_risk(stdout, stderr, meta)
-        # Merge agent-detected signals (from inside container) — deduplicate
-        for sig in agent_signals:
-            if sig not in reasons:
-                reasons.append(sig)
-        # Use the higher of heuristic score and agent score (agent has richer visibility)
-        score = min(100, max(score, agent_score))
-        # Reputation memory: a repo we've already judged carries that judgement forward.
-        prior = self._prior_run(meta.get("target", ""))
-        if prior.get("worst") == "DANGEROUS":
-            score = max(score, 80)
-            reasons.append(f"Previously judged DANGEROUS ({prior['runs']} prior run(s))")
-        elif prior.get("worst") == "SUSPICIOUS":
-            score = min(100, score + 10)
-            reasons.append(f"Previously judged SUSPICIOUS ({prior['runs']} prior run(s))")
-
-        # Deterministic verdict — the LLM never sets this.
-        level = _score_to_level(score)
-
-        if policy.get("block_on_foreign_egress", True) and meta.get("foreign_egress_ips"):
-            if level == "SAFE":
-                level = "SUSPICIOUS"
-            if len(meta["foreign_egress_ips"]) >= 3:
-                level = "DANGEROUS"
-            reasons.append("Foreign outbound egress observed during sandbox runtime")
 
         recommendation = _default_recommendation(level)
         ai_reason = _ai_sandbox_explain(level, score, reasons, meta)
@@ -831,20 +1141,115 @@ class SandboxRunner:
             ai_reason=ai_reason,
         )
 
+    def chain_of_trust(self, result: SandboxResult) -> list[dict]:
+        """The full promotion chain. Every step is offline and deterministic.
+
+        Behavior Report -> Policy Engine -> Signature -> SBOM -> Dependency Scan
+        -> Threat Intel -> (Human Approval, handled by promotion_gate)
+
+        Each step is {"step", "ok", "detail", "blocking"}. A failed blocking step
+        means the project cannot be promoted, no matter what the human says.
+        """
+        try:
+            meta = json.loads(Path(result.metadata_path).read_text(encoding="utf-8"))
+        except Exception:
+            meta = {}
+
+        behavior = meta.get("behavior") or {}
+        sbom     = meta.get("sbom") or {}
+        deps     = meta.get("dependency_findings") or []
+        intel    = meta.get("threat_intel") or {}
+        sig      = meta.get("signature") or {}
+        policy   = meta.get("policy") or {}
+        steps: list[dict] = []
+
+        have_behavior = bool(behavior.get("processes")) or bool(meta.get("behavior_rules"))
+        steps.append({
+            "step": "Behavior Report", "ok": have_behavior, "blocking": False,
+            "detail": (f"{len(behavior.get('processes', []))} processes, "
+                       f"{len(behavior.get('installs', []))} installs, "
+                       f"{len(behavior.get('file_access', []))} sensitive file access(es)")
+            if have_behavior else "no telemetry captured (container may have failed to start)",
+        })
+
+        steps.append({
+            "step": "Policy Engine", "ok": result.risk_level != "DANGEROUS", "blocking": True,
+            "detail": f"verdict {result.risk_level} (score {result.risk_score}, "
+                      f"{len(meta.get('behavior_rules', []))} rules fired)",
+        })
+
+        sig_required = bool(policy.get("require_signature", False))
+        steps.append({
+            "step": "Signature Verification",
+            "ok": bool(sig.get("verified")) or not sig_required,
+            "blocking": sig_required,
+            "detail": sig.get("detail", "not checked"),
+        })
+
+        steps.append({
+            "step": "SBOM", "ok": True, "blocking": False,
+            "detail": f"{sbom.get('declared_count', 0)} declared, "
+                      f"{len(sbom.get('installed_at_runtime', []))} installed at runtime, "
+                      f"{len(sbom.get('undeclared', []))} undeclared",
+        })
+
+        malicious = [d for d in deps if "Known-malicious" in d]
+        steps.append({
+            "step": "Dependency Scan", "ok": not malicious, "blocking": True,
+            "detail": "; ".join(deps[:3]) if deps else "no known-bad or undeclared packages",
+        })
+
+        hits = intel.get("hits") or []
+        steps.append({
+            "step": "Threat Intelligence", "ok": not hits, "blocking": True,
+            "detail": ("; ".join(hits[:3]) if hits else
+                       "no feed configured (~/.clawnet/threat_intel.json)"
+                       if not intel.get("feed_available") else "no matches on feed"),
+        })
+        return steps
+
     def promotion_gate(self, result: SandboxResult) -> bool:
-        approved = False
-        if result.risk_level == "DANGEROUS":
-            console.print("[bold red]Promotion blocked: DANGEROUS verdict.[/bold red]")
-            approved = False
-        elif result.risk_level == "SAFE":
-            console.print("[bold green]SAFE verdict: promotion allowed.[/bold green]")
-            approved = True
+        """Promote only after the whole chain of trust passes, human included."""
+        steps  = self.chain_of_trust(result)
+        blocked = [s for s in steps if s["blocking"] and not s["ok"]]
+
+        console.print(Rule("[bold]Chain of Trust[/bold]"))
+        for s in steps:
+            icon = "[green]PASS[/green]" if s["ok"] else (
+                "[red]FAIL[/red]" if s["blocking"] else "[yellow]WARN[/yellow]")
+            console.print(f"  {icon}  [cyan]{s['step']:<24}[/cyan] {s['detail']}")
+
+        if blocked:
+            console.print(
+                f"\n[bold red]Promotion blocked: {', '.join(s['step'] for s in blocked)} failed.[/bold red]"
+            )
+            self._update_reputation(result, approved=False)
+            policy_engine.log_decision(
+                "sandbox_promotion", target=result.target, approved=False,
+                level=result.risk_level, blocked_by=[s["step"] for s in blocked],
+            )
+            return False
+
+        # Human approval is the last link of the chain — always, even for SAFE.
+        if result.risk_level == "SAFE":
+            console.print("\n[bold green]✓ Sandbox Passed   ✓ Safe to Promote[/bold green]")
         else:
-            approved = self._approval_for_suspicious(result)
+            console.print(
+                f"\n[bold yellow]Verdict is {result.risk_level} — review the evidence above "
+                "before promoting.[/bold yellow]"
+            )
+        approved = self._human_approval(result)
+
         self._update_reputation(result, approved=approved)
+        policy_engine.log_decision(
+            "sandbox_promotion", target=result.target, approved=approved,
+            level=result.risk_level, score=result.risk_score,
+            chain=[{"step": s["step"], "ok": s["ok"]} for s in steps],
+        )
         return approved
 
-    def _approval_for_suspicious(self, result: SandboxResult) -> bool:
+    def _human_approval(self, result: SandboxResult) -> bool:
+        """Ask the operator to approve promotion. Safe default: Y for SAFE, N otherwise."""
         token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
         chat_id = os.environ.get("TELEGRAM_CHAT_ID", "")
         use_telegram = os.environ.get("CLAWNET_TELEGRAM_APPROVAL", "0").lower() in ("1", "true", "yes")
@@ -863,7 +1268,14 @@ class SandboxRunner:
                         return decision
                 except Exception:
                     pass
-        answer = input("Verdict is SUSPICIOUS. Promote to host anyway? [y/N]: ").strip().lower()
+        safe_default = result.risk_level == "SAFE"
+        prompt = "Approve promotion? [Y/n]: " if safe_default else "Approve promotion? [y/N]: "
+        try:
+            answer = input(prompt).strip().lower()
+        except EOFError:
+            answer = ""
+        if not answer:
+            return safe_default
         return answer in ("y", "yes")
 
     def _wait_telegram_decision(self, tg: "TelegramAlert", timeout_sec: int = 120) -> Optional[bool]:
@@ -1121,15 +1533,12 @@ class SandboxRunner:
         table.add_row("STDOUT Log", str(stdout_path))
         table.add_row("STDERR Log", str(stderr_path))
         if meta.get("telemetry_paths"):
-            tp = meta["telemetry_paths"]
-            table.add_row("Telemetry (proc)", str(tp.get("proc_sample", "")))
-            table.add_row("Telemetry (net)", str(tp.get("net_sample", "")))
+            table.add_row("Behavior Report", str(meta["telemetry_paths"].get("behavior", "")))
         if meta.get("foreign_egress_ips"):
             table.add_row("Foreign Egress", ", ".join(meta.get("foreign_egress_ips", [])[:5]))
         if meta.get("ai_reason"):
             table.add_row("AI Reason", str(meta["ai_reason"]))
-        if meta.get("reasons"):
-            table.add_row("Heuristic Signals", "; ".join(meta["reasons"]))
         console.print(table)
+        console.print(behavior_summary(meta))
         if meta.get("risk_level") == "DANGEROUS":
             console.print(Panel("DANGEROUS run detected. Host promotion is denied.", border_style="red"))

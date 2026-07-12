@@ -1,8 +1,4 @@
-
-
-
-
-2) supermemory local add into it
+Supermemory local add into it
 
 "Memory doesn't prove anything."
 

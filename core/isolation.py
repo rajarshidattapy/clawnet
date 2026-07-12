@@ -175,33 +175,13 @@ def _promotion_flow(runner: SandboxRunner, result: SandboxResult) -> None:
     console.print(_verdict_panel(result))
     console.print()
 
-    if result.risk_level == "DANGEROUS":
-        console.print(Panel(
-            "[bold red]DANGEROUS verdict — host promotion is blocked automatically.[/bold red]\n"
-            "This project must NOT be run on the host system.",
-            border_style="red",
-        ))
-        return
-
-    if result.risk_level == "SAFE":
-        console.print(Panel(
-            "[bold green]SAFE verdict — project cleared for host promotion.[/bold green]",
-            border_style="green",
-        ))
-        runner.promotion_gate(result)
-        return
-
-    # SUSPICIOUS — ask user
-    console.print(Panel(
-        "[bold yellow]SUSPICIOUS verdict — manual review required.[/bold yellow]\n"
-        "Review the signals above before deciding.",
-        border_style="yellow",
-    ))
+    # promotion_gate runs the full chain of trust (behavior -> policy -> signature
+    # -> SBOM -> dependency scan -> threat intel -> human) and prints each step.
     approved = runner.promotion_gate(result)
     if approved:
-        console.print("[green]Promotion approved by user.[/green]")
+        console.print("[green]Promotion approved — project cleared for the host.[/green]")
     else:
-        console.print("[red]Promotion denied.[/red]")
+        console.print("[red]Promotion denied — project stays in the sandbox.[/red]")
 
 
 def run_isolation_mode() -> None:
