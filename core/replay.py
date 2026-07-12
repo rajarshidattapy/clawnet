@@ -1,4 +1,4 @@
-"""Deterministic record/replay for OpenClaw decision flows.
+"""Deterministic record/replay for the ClawNet agent's decision flows.
 
 Technique borrowed from Volo (docs/volo.md), not the package — no dependency,
 just the four ideas that make agent tests deterministic:
@@ -38,7 +38,7 @@ Evidence = policy.Evidence
 
 CASSETTE_PATH = Path(os.environ.get(
     "CLAWNET_CASSETTE",
-    Path(__file__).resolve().parent.parent / "tests" / "recordings" / "openclaw.json",
+    Path(__file__).resolve().parent.parent / "tests" / "recordings" / "clawnet.json",
 ))
 
 
@@ -103,7 +103,7 @@ def cassette() -> Cassette:
 
 
 def transport(payload: dict, live_call: Callable[[], str]) -> str:
-    """The single seam every OpenClaw model call passes through.
+    """The single seam every ClawNet-agent model call passes through.
 
     off     → straight to the live model.
     record  → live call, then persist the take.
@@ -250,10 +250,10 @@ def record_fixtures(live: bool = False) -> None:
     explain = None
     if live:
         try:
-            from openclaw import OpenClaw
+            from clawnet_agent import ClawNet
         except ImportError:
-            from core.openclaw import OpenClaw  # type: ignore
-        oc = OpenClaw()
+            from core.clawnet_agent import ClawNet  # type: ignore
+        oc = ClawNet()
         if not oc.available:
             raise SystemExit("--live needs OPENAI_API_KEY and the openai package")
         explain = oc._explain

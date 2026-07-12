@@ -15,8 +15,8 @@ Backends (docs/docs_supermemorylocal.md):
     If the server is down or no key is set, ClawNet still works — the JSONL store
     answers every query.
 
-Modularity: the Policy Engine, sandbox, and OpenClaw all import this one store.
-OpenClaw only ever *queries* it (it must never write observations).
+Modularity: the Policy Engine, sandbox, and the ClawNet agent all import this one
+store. The agent only ever *queries* it (it must never write observations).
 """
 import json
 import os

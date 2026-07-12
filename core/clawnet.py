@@ -64,12 +64,12 @@ except ImportError:
     _HAS_SEND2TRASH = False
 
 try:
-    from openclaw import OpenClaw
+    from clawnet_agent import ClawNet
 except ImportError:
     try:
-        from core.openclaw import OpenClaw
+        from core.clawnet_agent import ClawNet
     except ImportError:
-        OpenClaw = None  # type: ignore
+        ClawNet = None  # type: ignore
 
 try:
     from telegram_alert import TelegramAlert, TelegramMock, PendingAction
@@ -742,7 +742,7 @@ def _run_chat_command(state: "ClawState", oc, msg: str) -> str:
         with state.lock:
             conns = list(state.connections)
         return oc.copilot(msg, _build_context(conns))
-    return "OpenClaw AI unavailable — set OPENAI_API_KEY to enable."
+    return "ClawNet AI unavailable — set OPENAI_API_KEY to enable."
 
 
 def _chat_worker(state: "ClawState", oc) -> None:
@@ -849,11 +849,11 @@ def _execute_tg_action(state: "ClawState", action) -> None:
                    approved_by="telegram")
 
 
-def _send_openclaw_alert(tg, level: str, process: str, pid, remote: str,
+def _send_clawnet_alert(tg, level: str, process: str, pid, remote: str,
                          rport="", geo: str = "", reason: str = "",
                          action: str = "monitor") -> None:
-    if hasattr(tg, "send_openclaw_alert"):
-        tg.send_openclaw_alert(
+    if hasattr(tg, "send_clawnet_alert"):
+        tg.send_clawnet_alert(
             level=level,
             process=process,
             pid=pid,
@@ -894,7 +894,7 @@ def _maybe_telegram_alert(state: "ClawState", connections: list, oc, tg) -> None
 
         a = oc.get(ck) if oc and oc.available else None
         reason = (a.reason if (a and not a.pending and a.reason) else v.summary)
-        _send_openclaw_alert(
+        _send_clawnet_alert(
             tg, v.level, ev.process, ev.pid, ev.remote, ev.rport or "—",
             ev.country or "—",
             f"{reason}  [score {v.score}, confidence {v.confidence:.0%}]",
@@ -962,7 +962,7 @@ _persist_lock = threading.Lock()
 def _persist_verdict(ck: tuple, ev, v) -> None:
     """Write the deterministic verdict to evidence memory, once per connection.
 
-    This is the memory *write* site — deterministic, not OpenClaw. Only flagged
+    This is the memory *write* site — deterministic, not the AI agent. Only flagged
     verdicts are worth keeping as forensic evidence.
     """
     mem = _memory_ref[0]
@@ -1041,7 +1041,7 @@ def build_table(
     connections: list,
     resolve: bool = False,
     new_keys: Optional[set] = None,
-    openclaw=None,
+    agent=None,
     row_offset: int = 0,
 ) -> Table:
     new_keys = new_keys or set()
@@ -1100,7 +1100,7 @@ def build_table(
 
         ck     = _conn_key(conn)
         is_new = ck in new_keys
-        ai_ch, ai_st = _ai_flag(openclaw, ck)
+        ai_ch, ai_st = _ai_flag(agent, ck)
 
         flags = Text()
         if is_new:     flags.append("★", style="bold yellow")
@@ -1133,7 +1133,7 @@ def build_connections_panel(state: "ClawState", resolve: bool, oc) -> Panel:
         conns[start:end],
         resolve=resolve,
         new_keys=new_keys,
-        openclaw=oc,
+        agent=oc,
         row_offset=start,
     )
     nav = (
@@ -1184,8 +1184,8 @@ def build_stats(connections: list) -> Panel:
                  border_style="bright_black", padding=(0, 1))
 
 
-def build_openclaw_panel(oc, tg, state: "ClawState") -> Panel:
-    title = "[bold bright_red]⚡ OPENCLAW INTELLIGENCE[/]"
+def build_clawnet_panel(oc, tg, state: "ClawState") -> Panel:
+    title = "[bold bright_red]⚡ CLAWNET INTELLIGENCE[/]"
     lines: list[str] = []
 
     if tg is not None:
@@ -1382,7 +1382,7 @@ def run_monitor(resolve: bool = False, auto: bool = False) -> None:
         mem = SuperMemory()
     _memory_ref[0] = mem            # policy rules can now see prior sightings
 
-    oc = OpenClaw(memory=mem) if OpenClaw is not None else None
+    oc = ClawNet(memory=mem) if ClawNet is not None else None
 
     tg_token   = os.environ.get("TELEGRAM_BOT_TOKEN", "")
     tg_chat_id = os.environ.get("TELEGRAM_CHAT_ID", "")
@@ -1435,7 +1435,7 @@ def run_monitor(resolve: bool = False, auto: bool = False) -> None:
                     build_header(),
                     build_connections_panel(state, resolve, oc),
                     build_stats(conns),
-                    build_openclaw_panel(oc, tg, state),
+                    build_clawnet_panel(oc, tg, state),
                     build_chat_panel(state, inner_width=max(40, console.width - 6)),
                 ))
                 time.sleep(0.5)
@@ -1448,7 +1448,7 @@ def run_monitor(resolve: bool = False, auto: bool = False) -> None:
 # ── copilot mode ──────────────────────────────────────────────────────────────
 
 def run_copilot() -> None:
-    oc = OpenClaw() if OpenClaw is not None else None
+    oc = ClawNet() if ClawNet is not None else None
     console.print(Panel(
         Align.center(Text(BANNER, style="bold bright_cyan")),
         border_style="bright_cyan",
@@ -1457,7 +1457,7 @@ def run_copilot() -> None:
     ))
     if oc is None or not oc.available:
         console.print(Panel(
-            "[yellow]OpenClaw unavailable.[/]\n"
+            "[yellow]ClawNet agent unavailable.[/]\n"
             "Install openai:  [bold]pip install openai[/]\n"
             "Set your key:    [bold]set OPENAI_API_KEY=sk-...[/]",
             border_style="yellow",
@@ -1488,7 +1488,7 @@ def run_copilot() -> None:
         with state.lock:
             state.connections = connections
         answer = _run_chat_command(state, oc, question)
-        console.print(Panel(answer, border_style="bright_cyan", title="[bold]OpenClaw[/]"))
+        console.print(Panel(answer, border_style="bright_cyan", title="[bold]ClawNet[/]"))
     console.print("\n[bold bright_cyan]Copilot session ended.[/]")
 
 

@@ -1,6 +1,6 @@
-"""Deterministic regression suite for the policy engine and OpenClaw.
+"""Deterministic regression suite for the policy engine and the ClawNet agent.
 
-Runs fully offline against the recorded cassette (tests/recordings/openclaw.json)
+Runs fully offline against the recorded cassette (tests/recordings/clawnet.json)
 — no API key, no network, $0. Run with pytest, or just: python tests/test_policy.py
 """
 import os
@@ -11,7 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "core"))
 
 import policy
 import replay
-from openclaw import OpenClaw
+from clawnet_agent import ClawNet
 
 
 def test_policy_rules_and_guardrails():
@@ -52,7 +52,7 @@ def test_llm_cannot_change_the_verdict():
     verdict = policy.evaluate(ev)
     assert verdict.level == "CRITICAL"
 
-    oc = OpenClaw.__new__(OpenClaw)           # no client, no thread, no key
+    oc = ClawNet.__new__(ClawNet)            # no client, no thread, no key
     oc._cache, oc._memory, oc._ok = {}, None, False
     import threading, queue
     oc._lock, oc._q = threading.Lock(), queue.Queue()
