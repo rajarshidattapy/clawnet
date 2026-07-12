@@ -39,7 +39,7 @@ if sys.platform == "win32":
 try:
     import psutil
 except ImportError:
-    print("pip install psutil rich openai python-telegram-bot send2trash")
+    print("pip install psutil rich python-telegram-bot send2trash")
     sys.exit(1)
 
 try:
@@ -750,7 +750,7 @@ def _run_chat_command(state: "ClawState", oc, msg: str) -> str:
         with state.lock:
             conns = list(state.connections)
         return oc.copilot(msg, _build_context(conns))
-    return "ClawNet AI unavailable — set OPENAI_API_KEY to enable."
+    return "ClawNet AI unavailable — start Ollama to enable."
 
 
 def _chat_worker(state: "ClawState", oc) -> None:
@@ -1214,9 +1214,8 @@ def build_clawnet_panel(oc, tg, state: "ClawState") -> Panel:
         border = "bright_black"
     else:
         if not oc.available:
-            why = ("[red]openai[/red] not installed" if not os.environ.get("OPENAI_API_KEY")
-                   else "[yellow]OPENAI_API_KEY[/yellow] not set")
-            lines.append(f"[dim]Verdicts live (policy engine). AI explanations off — {why}.[/dim]")
+            lines.append("[dim]Verdicts live (policy engine). AI explanations off — "
+                         "start [yellow]Ollama[/yellow] to enable.[/dim]")
             lines.append("")
 
         analyses   = oc.all_analyses()
@@ -1469,8 +1468,9 @@ def run_copilot() -> None:
     if oc is None or not oc.available:
         console.print(Panel(
             "[yellow]ClawNet agent unavailable.[/]\n"
-            "Install openai:  [bold]pip install openai[/]\n"
-            "Set your key:    [bold]set OPENAI_API_KEY=sk-...[/]",
+            "Start Ollama:    [bold]ollama serve[/]\n"
+            "Pull the model:  [bold]ollama pull qwen3:8b[/]\n"
+            "[dim]Override with OLLAMA_HOST / OLLAMA_MODEL.[/dim]",
             border_style="yellow",
         ))
         return

@@ -244,7 +244,7 @@ def _stub_explanation(ev: Evidence, v: policy.Verdict) -> str:
 
 
 def record_fixtures(live: bool = False) -> None:
-    """Seed the cassette. With OPENAI_API_KEY + --live, records the real model."""
+    """Seed the cassette. With a running Ollama server + --live, records the real model."""
     c = Cassette()
     c.takes = {}                 # fresh recording — never merge stale takes
     explain = None
@@ -255,7 +255,7 @@ def record_fixtures(live: bool = False) -> None:
             from core.clawnet_agent import ClawNet  # type: ignore
         oc = ClawNet()
         if not oc.available:
-            raise SystemExit("--live needs OPENAI_API_KEY and the openai package")
+            raise SystemExit("--live needs a running Ollama server (OLLAMA_HOST)")
         explain = oc._explain
 
     for ev in FIXTURES:

@@ -1,4 +1,4 @@
-"""ClawNet — the AI security *analyst*. Powered by GPT-4o-mini.
+"""ClawNet — the AI security *analyst*. Powered by a local Ollama model.
 
 The ClawNet agent does not decide anything. The deterministic policy engine
 (policy.py) assigns the verdict; the agent only explains that verdict in plain
@@ -6,28 +6,21 @@ English using the collected evidence. It receives sanitized JSON — never raw
 files, source code, logs or any other attacker-controlled text.
 """
 import json
-import os
 import queue
 import threading
 from dataclasses import dataclass, field
 from typing import Optional
 
 try:
-    import openai as _openai
-    _HAS_OPENAI = True
-except ImportError:
-    _HAS_OPENAI = False
-
-try:
     from policy import Evidence, Verdict, contradicts, llm_payload, log_verdict, scrub
     from memory import evidence_summary as _evidence_summary
+    import llm
     import replay
 except ImportError:
     from core.policy import Evidence, Verdict, contradicts, llm_payload, log_verdict, scrub
     from core.memory import evidence_summary as _evidence_summary  # type: ignore
+    from core import llm  # type: ignore
     from core import replay  # type: ignore
-
-_MODEL = "gpt-4o-mini"
 
 _SYSTEM_EXPLAIN = """\
 You are ClawNet, the security analyst in this Windows network monitor.
@@ -77,17 +70,13 @@ def _fallback(verdict: "Verdict") -> str:
 
 class ClawNet:
     def __init__(self, memory=None) -> None:
-        key = os.environ.get("OPENAI_API_KEY", "")
-        self._client = None
-        # In replay mode the cassette stands in for the model — no key, no network.
-        self._ok     = (_HAS_OPENAI and bool(key)) or replay.is_replaying()
+        # In replay mode the cassette stands in for the model — no server needed.
+        self._ok     = llm.available() or replay.is_replaying()
         self._cache: dict[tuple, Analysis] = {}
         self._lock   = threading.Lock()
         self._q: queue.Queue = queue.Queue(maxsize=30)
         self._memory = memory
         if self._ok:
-            if _HAS_OPENAI and key:
-                self._client = _openai.OpenAI(api_key=key)
             threading.Thread(target=self._worker, daemon=True).start()
 
     @property
@@ -139,16 +128,12 @@ class ClawNet:
 
     def copilot(self, question: str, context: str) -> str:
         if not self._ok:
-            return "ClawNet agent unavailable — set OPENAI_API_KEY to enable AI features."
-        r = self._client.chat.completions.create(
-            model=_MODEL,
+            return "ClawNet agent unavailable — start Ollama to enable AI features."
+        return llm.chat(
+            _SYSTEM_COPILOT,
+            f"Network context:\n{context}\n\nQuestion: {question}",
             max_tokens=600,
-            messages=[
-                {"role": "system", "content": _SYSTEM_COPILOT},
-                {"role": "user",   "content": f"Network context:\n{context}\n\nQuestion: {question}"},
-            ],
         )
-        return r.choices[0].message.content.strip()
 
     # ── internals ─────────────────────────────────────────────────────────────
 
@@ -199,15 +184,7 @@ class ClawNet:
                 pass
 
         def _live() -> str:
-            r = self._client.chat.completions.create(
-                model=_MODEL,
-                max_tokens=100,
-                messages=[
-                    {"role": "system", "content": _SYSTEM_EXPLAIN},
-                    {"role": "user",   "content": json.dumps(payload)},
-                ],
-            )
-            return r.choices[0].message.content.strip().strip('"')
+            return llm.chat(_SYSTEM_EXPLAIN, json.dumps(payload), max_tokens=100).strip('"')
 
         text = replay.transport(payload, _live).strip().strip('"')
         # A model that calls a CRITICAL connection "safe" is worse than silence.

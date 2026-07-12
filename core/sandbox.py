@@ -29,9 +29,9 @@ from rich.table import Table
 from rich.text import Text
 
 try:
-    import openai as _openai
+    import llm
 except ImportError:
-    _openai = None
+    from core import llm  # type: ignore
 
 try:
     from memory import SuperMemory, make_event, make_evidence, behavior_fingerprint
@@ -821,7 +821,7 @@ def _ai_sandbox_explain(level: str, score: int, reasons: list[str], meta: dict) 
     other text the project controls is NEVER sent. Only reason codes and counts
     derived by our own heuristics — all scrubbed — cross this boundary.
     """
-    if _openai is None or not os.environ.get("OPENAI_API_KEY"):
+    if not llm.available():
         return ""
     payload = {
         "verdict": level,                       # already decided
@@ -854,15 +854,7 @@ def _ai_sandbox_explain(level: str, score: int, reasons: list[str], meta: dict) 
         "threat_intelligence is present, cite only its CVEs, sources, dates, or summaries."
     )
     try:
-        resp = _openai.OpenAI(api_key=os.environ["OPENAI_API_KEY"]).chat.completions.create(
-            model="gpt-4o-mini",
-            max_tokens=100,
-            messages=[
-                {"role": "system", "content": system},
-                {"role": "user", "content": json.dumps(payload)},
-            ],
-        )
-        return resp.choices[0].message.content.strip().strip('"')[:160]
+        return llm.chat(system, json.dumps(payload), max_tokens=100).strip('"')[:160]
     except Exception:
         return ""
 
