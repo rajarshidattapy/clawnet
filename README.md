@@ -1,24 +1,23 @@
 <h1 align="center">ClawNet</h1>
 
-<p align="center">
-  <img width="920" height="171" alt="ClawNet" src="https://github.com/user-attachments/assets/62e1cdf7-c5de-4e5e-8d59-3cabaadc676c" />
-</p>
+<!-- <p align="center"><img width="920" height="171" alt="ClawNet" src="https://github.com/user-attachments/assets/62e1cdf7-c5de-4e5e-8d59-3cabaadc676c" /></p> -->
+
+<p align="center"><img width="920" height="171" alt="ClawNet" src="" /></p>
 
 <p align="center">
-  <b>AI-powered runtime defense for hosts, containers, and Kubernetes.</b>
+  <b>AI-powered runtime defense for hosts and containers.</b>
 </p>
 
 ---
 
 ClawNet is a terminal security platform built on one principle: **a deterministic policy engine makes every security decision, and the AI only explains it.** The LLM never decides whether something is safe — it reads the structured evidence the engine already scored and narrates the verdict in plain English. Same evidence in, same verdict out, every time.
 
-It has three defense layers:
+It has two defense layers:
 
 - **Live host network monitoring** — every TCP/UDP connection scored in real time
 - **Isolation sandbox** — unknown code is quarantined in Docker, watched from the inside, and only reaches your host after passing a full chain of trust
-- **Autonomous Kubernetes incident response** — a separate multi-agent layer for production clusters
 
-Around those layers sit an evidence-based forensic memory, a threat-intelligence feed, a human-approval gate on every dangerous action, and an immutable decision log.
+Around them sit an evidence-based forensic memory, a threat-intelligence feed, a human-approval gate on every dangerous action, and an immutable decision log.
 
 > "Nothing runs on the host before ClawNet approves it."
 
@@ -37,8 +36,6 @@ Around those layers sit an evidence-based forensic memory, a threat-intelligence
 | Full report | `clawnet sandbox-report <run-id>` | JSON dump of a past sandbox run |
 | Policy setup | `clawnet policy-init` | Create/view the sandbox policy file |
 | Git interceptors | `clawnet install-interceptors` | Install wrappers that route `git clone` through ClawNet |
-
-Kubernetes runtime defense lives in a separate component (`core/k8agent/`) with its own runner — see below.
 
 ---
 
@@ -181,49 +178,6 @@ The agent **only queries** memory; writes originate exclusively from the determi
 
 ---
 
-# Kubernetes Runtime Defense
-
-A separate autonomous incident-response layer (`core/k8agent/`) for production clusters — it investigates failures, diagnoses root causes, plans remediations, executes safe fixes, and routes dangerous actions through human approval.
-
-### Multi-agent system
-
-```text
-                    +----------------------+
-                    |  INCIDENT COMMANDER  |
-                    |     (Supervisor)     |
-                    +----------+-----------+
-                               |
-            +------------------+------------------+
-            |                  |                  |
-   +--------v--------+ +------v------+ +---------v---------+
-   |   SCOUT AGENT   | |DOCTOR AGENT | |  EXECUTOR AGENT   |
-   | Cluster watcher | | Root cause  | | Safe remediation  |
-   +-----------------+ +-------------+ +-------------------+
-```
-
-### 7-stage incident pipeline
-
-`Observe -> Detect -> Diagnose -> Plan -> Safety Gate -> Execute -> Explain & Log`
-
-### Features
-
-Autonomous anomaly detection · root-cause analysis from logs/events/metrics · predictive OOM alerts · self-evolving runbook memory · Slack human-in-the-loop approvals · RBAC-scoped least-privilege execution · natural-language war room · chaos-engineering mode · Stellar Soroban blockchain audit trail.
-
-### Supported incident types
-
-| Incident | Severity | Auto-Fix |
-|---|---|---|
-| CrashLoopBackOff | HIGH | Yes |
-| OOMKilled | HIGH | Yes |
-| Evicted Pod | LOW | Yes |
-| Pending Pod | MED | HITL |
-| ImagePullBackOff | MED | HITL |
-| CPU Throttling | MED | HITL |
-| Deployment Stalled | HIGH | HITL |
-| Node NotReady | CRITICAL | HITL |
-
----
-
 # Behavior Detection Signals (inside the sandbox)
 
 | Signal | Points |
@@ -252,8 +206,6 @@ Autonomous anomaly detection · root-cause analysis from logs/events/metrics · 
 
 **Isolation** — Docker CLI, `container_agent.py`, pluggable backends (gVisor / Kata ready)
 
-**Kubernetes** — LangGraph, FastMCP, kubectl tools, FastAPI, Slack Block Kit, LiteLLM, Claude Opus / Sonnet, React + Tailwind dashboard, Stellar Soroban contracts
-
 ---
 
 # Installation
@@ -272,7 +224,7 @@ pip install -r core/requirements.txt
 
 # Environment Variables
 
-Create a `.env` file in the repo root:
+Create a `.env` file in the repo root. Every integration is optional:
 
 ```env
 # AI explanations (optional — verdicts work without it)
@@ -292,13 +244,9 @@ SUPERMEMORY_API_URL=http://localhost:6767
 
 # Where approved sandbox projects are promoted (default ~/clawnet-workspace)
 CLAWNET_HOST_WORKSPACE=/path/to/workspace
-
-# Kubernetes approvals (k8agent)
-SLACK_BOT_TOKEN=your_slack_bot_token
-SLACK_SIGNING_SECRET=your_slack_signing_secret
 ```
 
-Every integration is optional. With nothing configured, the policy engine, sandbox, evidence memory, and decision log all still work fully offline.
+With nothing configured, the policy engine, sandbox, evidence memory, and decision log all still work fully offline.
 
 ---
 
@@ -418,12 +366,10 @@ clawnet/
 │   ├── isolation.py          # sandbox TUI
 │   ├── telegram_alert.py     # alerts + approval flow
 │   ├── netwatch.py           # legacy standalone monitor
-│   ├── requirements.txt
-│   └── k8agent/              # Kubernetes multi-agent incident response
-├── tests/                    # policy self-checks, replay cassette, sandbox demo
+│   └── requirements.txt
+├── tests/                    # policy self-checks, threat-intel tests, replay cassette, sandbox demo
 ├── scripts/                  # supermemory-local.sh
 ├── docs/
-├── contracts/                # Stellar Soroban audit contract
 ├── clawnet.py                # launcher
 ├── pyproject.toml
 └── .env
@@ -437,8 +383,10 @@ clawnet/
 python core/policy.py        # policy engine + guardrails + injection firewall self-check
 python core/memory.py        # evidence store + fingerprinting self-check
 python core/replay.py score  # deterministic ship / no-ship eval (offline, $0)
-python tests/test_policy.py  # full regression suite
+python -m pytest tests/      # full regression suite (policy + threat intelligence)
 ```
+
+Every check runs offline at $0 — no API key, no network, no Docker required.
 
 ---
 
@@ -456,13 +404,13 @@ python tests/test_policy.py  # full regression suite
 
 # Vision
 
-ClawNet is evolving into a full autonomous runtime-defense system — answering not just *"what is happening?"* but *"what caused it, how dangerous is it, and should the system act automatically?"* — an AI-native, policy-gated security layer for local machines, containers, CI/CD, and Kubernetes.
+ClawNet is evolving into a full autonomous runtime-defense system — answering not just *"what is happening?"* but *"what caused it, how dangerous is it, and should the system act automatically?"* — an AI-native, policy-gated security layer for local machines, containers, and CI/CD pipelines.
 
 ---
 
 # Future Scope
 
-eBPF runtime instrumentation · multi-cluster Kubernetes monitoring · autonomous GitHub remediation PRs · threat-graph visualization · distributed sandbox fleet · WASM / Firecracker sandbox runtimes · additional threat-intel providers (VirusTotal, AbuseIPDB, OTX, URLHaus).
+eBPF runtime instrumentation · autonomous GitHub remediation PRs · threat-graph visualization · distributed sandbox fleet · WASM / Firecracker sandbox runtimes · additional threat-intel providers (VirusTotal, AbuseIPDB, OTX, URLHaus).
 
 ---
 
