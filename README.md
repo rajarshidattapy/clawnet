@@ -2,7 +2,7 @@
 
 <!-- <p align="center"><img width="920" height="171" alt="ClawNet" src="https://github.com/user-attachments/assets/62e1cdf7-c5de-4e5e-8d59-3cabaadc676c" /></p> -->
 
-<p align="center"><img width="920" height="171" alt="ClawNet" src="" /></p>
+<p align="center"><img width="920" height="171" alt="ClawNet" src="https://github.com/user-attachments/assets/c52a108c-7107-480f-ac85-ec269ce112a3" /></p>
 
 <p align="center">
   <b>AI-powered runtime defense for hosts and containers.</b>
