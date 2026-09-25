@@ -1,4 +1,4 @@
-"""ClawNet — the AI security *analyst*. Powered by a local Ollama model.
+"""ClawNet — the AI security *analyst*. Powered by the OpenAI API (core/llm.py).
 
 The ClawNet agent does not decide anything. The deterministic policy engine
 (policy.py) assigns the verdict; the agent only explains that verdict in plain
@@ -128,7 +128,7 @@ class ClawNet:
 
     def copilot(self, question: str, context: str) -> str:
         if not self._ok:
-            return "ClawNet agent unavailable — start Ollama to enable AI features."
+            return "ClawNet agent unavailable — set OPENAI_API_KEY to enable AI features."
         return llm.chat(
             _SYSTEM_COPILOT,
             f"Network context:\n{context}\n\nQuestion: {question}",

@@ -130,11 +130,47 @@ The agent **does not directly control the machine**.
 
 ---
 
-## Run TrueForge
+## Quickstart
+
+Requires Windows, Python 3.10+, Node 22.14+, Docker Desktop (for the sandbox), and an OpenAI API key.
 
 ```bash
-npx @truefoundry/trueforge@latest
+python -m venv .venv && .venv\Scripts\activate
+pip install -r core/requirements.txt
+copy .env.example .env                       # set OPENAI_API_KEY
+
+# terminal 1 — the agent harness
+npx @truefoundry/trueforge@latest            # http://localhost:8790
+
+# terminal 2 — ClawNet's capabilities as MCP tools
+python -m clawforge serve                    # http://127.0.0.1:8765/mcp (bearer token)
+
+# terminal 3 — wire them together, then hand over a job
+python -m clawforge setup                    # OpenAI provider + `clawnet` connector + `clawforge` agent
+python -m clawforge run "Which processes on this machine look suspicious? Contain anything that is."
 ```
+
+You can also open the TrueForge chat UI, pick the `clawforge` agent, and approve with **Allow / Deny** there. `clawnet forge <cmd>` works the same way as `python -m clawforge <cmd>`.
+
+## Where it stops
+
+Each ClawNet capability is an MCP tool. The approval line is set by the tool's MCP annotations, which TrueForge enforces:
+
+| Tier | Tools | Gate |
+|---|---|---|
+| **Observe** (read-only) | `system_status`, `list_connections`, `suspicious_processes`, `inspect_process`, `who_is_listening`, `explain_pid`, `lookup_evidence`, `threat_intel`, `recent_decisions`, `preview_action`, `list_sandbox_runs`, `sandbox_report` | runs autonomously |
+| **Execute** (Docker sandbox) | `sandbox_run_code`, `sandbox_run_path`, `sandbox_clone` | runs autonomously: no capabilities, read-only workspace, network off by default, decoy credentials |
+| **Control** (changes the host) | `kill_process`, `suspend_process`, `block_ip`, `quarantine_file`, `close_port`, `promote_sandbox_run` | **human approval on every call** |
+
+The gate has several layers:
+
+1. Control tools are annotated `destructiveHint` **and** named explicitly in `require_approval_for_tools`.
+2. Before a control action is proposed, `preview_action` measures its guardrail result and blast radius. The CLI shows that briefing again at the approval prompt, re-measured locally rather than taken from the agent's word.
+3. After a human approves, ClawNet's guardrails still run and can refuse: protected processes, private IPs, System32 files, or a failed chain-of-trust step.
+4. The MCP server only listens on localhost and requires a bearer token, so only the registered TrueForge connector can reach it.
+5. Every verdict, approval, refusal and action is appended to `~/.clawnet/decisions.jsonl`.
+
+Machine-sourced strings (process names, paths, sandbox output) go through ClawNet's prompt-injection scrubber before they reach the model.
 
 - [TrueForge](https://github.com/truefoundry/trueforge)
 - [ClawNet](https://github.com/rajarshidattapy/clawnet)
@@ -167,13 +203,18 @@ Machine
 
 ## Files
 
-1) core/              -> core logic
-2) scripts/           -> scripts to run for setup
-3) tests/             -> feature tests
-4) docs/clawnet_docs/ -> old security terminal
-5) new_arch.md        -> updated idea to build on
-5) hackdetails.md     -> details about the hackathon
-6) trueforge_integration -> check if needed
+1) core/              -> core logic (policy engine, sandbox, monitor, memory, LLM via OpenAI)
+2) clawforge/         -> the harness layer
+   - capabilities.py  -> ClawNet primitives as JSON-returning functions (observe / execute / control)
+   - mcp_server.py    -> those functions as annotated MCP tools, with bearer auth
+   - harness.py       -> TrueForge setup, the harness-owned state machine, approval briefings
+   - __main__.py      -> `python -m clawforge serve | setup | run | chat | tools`
+3) scripts/           -> scripts to run for setup
+4) tests/             -> feature tests (`test_clawforge.py` covers where the harness stops)
+5) docs/clawnet_docs/ -> old security terminal
+6) docs/new_arch.md   -> the architecture this implements
+7) docs/hackdetails.md -> details about the hackathon
+8) docs/trueforge_integration.md -> reference integration example
 
 
 Built for the **TrueFoundry TrueForge Hackathon**.

@@ -190,3 +190,16 @@ And the exact quickstart is:
 npx @truefoundry/trueforge@latest
 
 Node.js 22.14+ is currently required.
+---
+
+## 8. Implementation map
+
+| Architecture piece | Where it lives |
+|---|---|
+| Internal agent system | `clawforge` agent spec in `clawforge/harness.py` (OpenAI model, runs in TrueForge) |
+| TrueForge: sessions, subagents, approval | `python -m clawforge setup` registers the provider, connector and agent. `run` / `chat` drive sessions. |
+| ClawNet capabilities | `clawforge/capabilities.py`, exposed as MCP tools by `clawforge/mcp_server.py` |
+| Policy / security checks | `core/policy.py` guardrails, re-checked after every approval |
+| Approval required → Human | Control tools are `destructiveHint` and named in `require_approval_for_tools`. The terminal briefing comes from `preview_action`. |
+| Evidence | `~/.clawnet/decisions.jsonl` and `~/.clawnet/evidence.jsonl` |
+| State model (§6) | `HarnessState` in `clawforge/harness.py`, driven by TrueForge events, never by model text |

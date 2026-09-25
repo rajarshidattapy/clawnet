@@ -877,6 +877,7 @@ class SandboxRunner:
         deep_scan: bool = False,
         force_network_mode: str = "",
         stream: bool = False,
+        max_runtime_seconds: int = 0,
     ) -> SandboxResult:
         if not _looks_like_git_url(git_url):
             raise ValueError("Expected a git URL ending with .git")
@@ -895,6 +896,7 @@ class SandboxRunner:
                 deep_scan=deep_scan,
                 force_network_mode=force_network_mode,
                 stream=stream,
+                max_runtime_seconds=max_runtime_seconds,
             )
         finally:
             shutil.rmtree(clone_root, ignore_errors=True)
@@ -906,6 +908,7 @@ class SandboxRunner:
         deep_scan: bool = False,
         force_network_mode: str = "",
         stream: bool = False,
+        max_runtime_seconds: int = 0,
     ) -> SandboxResult:
         source = Path(target_path).resolve()
         if not source.exists():
@@ -924,6 +927,8 @@ class SandboxRunner:
         policy = _load_policy()
         if force_network_mode in ("none", "bridge"):
             policy["network_mode"] = force_network_mode
+        if max_runtime_seconds > 0:
+            policy["max_runtime_seconds"] = max_runtime_seconds
         # Identity (for reputation/memory) is the ORIGINAL source, never the copy.
         fingerprint = self._fingerprint_target(source)
         reputation = self._load_reputation()
@@ -1189,6 +1194,7 @@ class SandboxRunner:
                 "recommendation": recommendation,
                 "ai_reason": ai_reason,
                 "sandbox_dir": str(sandbox_dir),
+                "workspace": str(workspace),
             }
         )
         metadata_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
@@ -1336,6 +1342,58 @@ class SandboxRunner:
             chain=[{"step": s["step"], "ok": s["ok"]} for s in steps],
         )
         return approved
+
+    def result_for_run(self, run_id: str) -> Optional[SandboxResult]:
+        """Rebuild a SandboxResult for a past run from its index entry + metadata."""
+        entry = next((r for r in self.list_runs(limit=200) if r.get("run_id") == run_id), None)
+        if entry is None:
+            return None
+        sandbox_dir = Path(entry.get("sandbox_dir", ""))
+        workspace = entry.get("workspace") or str(_QUARANTINE_ROOT / run_id)
+        return SandboxResult(
+            target=entry.get("target", ""),
+            run_id=run_id,
+            sandbox_dir=str(sandbox_dir),
+            stdout_path=str(sandbox_dir / "stdout.log"),
+            stderr_path=str(sandbox_dir / "stderr.log"),
+            metadata_path=str(sandbox_dir / "metadata.json"),
+            exit_code=0,
+            timed_out=False,
+            risk_score=int(entry.get("risk_score", 0)),
+            risk_level=entry.get("risk_level", "?"),
+            reasons=[],
+            recommendation=entry.get("recommendation", ""),
+            ai_reason=entry.get("ai_reason", ""),
+            workspace=workspace,
+        )
+
+    def promote_approved(self, result: SandboxResult, approved_by: str) -> dict:
+        """Non-interactive promotion for a caller that already obtained human approval
+        (e.g. a TrueForge approval checkpoint). The chain of trust still runs: a failed
+        blocking step refuses promotion no matter who approved it."""
+        steps = self.chain_of_trust(result)
+        blocked = [s["step"] for s in steps if s["blocking"] and not s["ok"]]
+        chain = [{"step": s["step"], "ok": s["ok"], "blocking": s["blocking"],
+                  "detail": s["detail"]} for s in steps]
+        if blocked:
+            self._update_reputation(result, approved=False)
+            policy_engine.log_decision(
+                "sandbox_promotion", target=result.target, approved=False,
+                level=result.risk_level, blocked_by=blocked, approved_by=approved_by,
+            )
+            return {"promoted": False, "blocked_by": blocked, "chain": chain,
+                    "left_in_quarantine": result.workspace}
+        self._update_reputation(result, approved=True)
+        promoted_to = self.promote_to_host(result)
+        policy_engine.log_decision(
+            "sandbox_promotion", target=result.target, approved=True,
+            level=result.risk_level, score=result.risk_score, approved_by=approved_by,
+            promoted_to=str(promoted_to) if promoted_to else "",
+            chain=[{"step": s["step"], "ok": s["ok"]} for s in steps],
+        )
+        return {"promoted": promoted_to is not None,
+                "promoted_to": str(promoted_to) if promoted_to else "",
+                "chain": chain}
 
     def _human_approval(self, result: SandboxResult) -> bool:
         """Ask the operator to approve promotion. Safe default: Y for SAFE, N otherwise."""
@@ -1599,6 +1657,7 @@ class SandboxRunner:
             "recommendation": meta.get("recommendation", ""),
             "ai_reason": meta.get("ai_reason", ""),
             "sandbox_dir": meta.get("sandbox_dir", ""),
+            "workspace": meta.get("workspace", ""),
         }
         try:
             _RUNS_INDEX_PATH.parent.mkdir(parents=True, exist_ok=True)

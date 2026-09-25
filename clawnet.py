@@ -18,6 +18,12 @@ def main() -> None:
         _cw.run_monitor(resolve=False, auto=False)
         return
 
+    if args[0] == "forge":
+        # ClawForge: ClawNet as an agentic harness on TrueForge (see clawforge/).
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        from clawforge.__main__ import main as forge_main
+        sys.exit(forge_main(args[1:]))
+
     if "--isolation" in args:
         from isolation import run_isolation_mode
         run_isolation_mode()

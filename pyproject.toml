@@ -12,6 +12,8 @@ dependencies = [
     "rich>=13.0",
     "python-telegram-bot>=20.0",
     "send2trash>=1.8",
+    "mcp>=1.10,<2",
+    "trueforge-sdk>=0.2",
 ]
 
 [project.optional-dependencies]
@@ -24,4 +26,4 @@ clawnet = "clawnet:main"
 
 [tool.setuptools]
 py-modules = ["clawnet"]
-packages   = ["core"]
+packages   = ["core", "clawforge"]
