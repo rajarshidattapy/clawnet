@@ -4,6 +4,8 @@
 
 **ClawForge is an open-source harness for running, observing, and controlling agentic workloads on your machine.**
 
+![ClawForge Banner](docs/banner.png)
+
 It evolves from a security-focused terminal into a layer that an internal agentic system can operate through, powered by [TrueForge](https://github.com/truefoundry/trueforge).
 
 ---
