@@ -20,7 +20,7 @@
 #   wsl -d Ubuntu -- bash -lc 'curl -fsSL -o /tmp/bun.zip \
 #     https://github.com/oven-sh/bun/releases/latest/download/bun-linux-x64.zip \
 #     && python3 -c "import zipfile;zipfile.ZipFile(\"/tmp/bun.zip\").extractall(\"/tmp/b\")" \
-#     && mkdir -p ~/.bun/bin && cp /tmp/b/*/bun ~/.bun/bin/bun && chmod +x ~/.bun/bin/bun'
+#     && mkdir -p ~/.bun/bin && cp /tmp/b/*/bun ~/.bun/bin/bun && chmod +x ~/.bun/bin/bun' -
 
 set -e
 # Forward the host OpenAI key into WSL (server needs one LLM key at first boot).

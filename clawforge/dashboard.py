@@ -256,6 +256,17 @@ class Dashboard:
             self.sink.print(tools_panel())
         elif cmd == "/watch":
             self.sink.print("[dim]already watching[/dim]")
+        elif cmd == "/news":
+            from clawforge.tui import news
+            arg = text[5:].strip()
+            self.sink.print("[dim]searching stored news…[/dim]" if arg else "[dim]fetching live security news…[/dim]")
+
+            def job():
+                try:
+                    self.sink.print(news(arg))
+                except Exception as exc:
+                    self.sink.print(f"[red]/news failed:[/red] {exc}")
+            threading.Thread(target=job, daemon=True).start()
         else:
             self.sink.print(f"[yellow]unknown command {text}[/yellow] — /help")
         self.log_scroll = 0

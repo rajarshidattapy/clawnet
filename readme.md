@@ -132,7 +132,7 @@ The agent **does not directly control the machine**.
 
 ## Quickstart
 
-Requires Windows, Python 3.10+, Node 22.14+, Docker Desktop (for the sandbox), and an OpenAI API key.
+Requires Windows, Python 3.10+, Node 22.14+, an OpenAI API key, and a sandbox: a **Daytona** API key (primary, `DAYTONA_API_KEY`) and/or Docker Desktop (fallback).
 
 ```bash
 python -m venv .venv && .venv\Scripts\activate
@@ -162,7 +162,7 @@ Each ClawNet capability is an MCP tool. The approval line is set by the tool's M
 | Tier | Tools | Gate |
 |---|---|---|
 | **Observe** (read-only) | `system_status`, `list_connections`, `suspicious_processes`, `inspect_process`, `who_is_listening`, `explain_pid`, `lookup_evidence`, `threat_intel`, `recent_decisions`, `preview_action`, `list_sandbox_runs`, `sandbox_report` | runs autonomously |
-| **Execute** (Docker sandbox) | `sandbox_run_code`, `sandbox_run_path`, `sandbox_clone` | runs autonomously: no capabilities, read-only workspace, network off by default, decoy credentials |
+| **Execute** (Daytona sandbox, Docker fallback) | `sandbox_run_code`, `sandbox_run_path`, `sandbox_clone` | runs autonomously in an ephemeral Daytona sandbox (local Docker if Daytona is unavailable): quarantined copy only, decoy credentials, canary secrets, host env never forwarded |
 | **Control** (changes the host) | `kill_process`, `suspend_process`, `block_ip`, `quarantine_file`, `close_port`, `promote_sandbox_run` | **human approval on every call** |
 
 The gate has several layers:

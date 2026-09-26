@@ -307,9 +307,9 @@ class ThreatIntelligenceService:
         client: Any = None,
         cache_ttl_seconds: Optional[int] = None,
     ) -> None:
-        self._cache_path = cache_path or Path(os.environ.get("CLAWNET_THREAT_CACHE_PATH", _DEFAULT_CACHE_PATH))
+        self._cache_path = cache_path or Path(os.environ.get("CLAWNET_THREAT_CACHE_PATH") or _DEFAULT_CACHE_PATH)
         self._cache_ttl = cache_ttl_seconds or int(
-            os.environ.get("CLAWNET_THREAT_CACHE_TTL_SECONDS", _DEFAULT_CACHE_TTL)
+            os.environ.get("CLAWNET_THREAT_CACHE_TTL_SECONDS") or _DEFAULT_CACHE_TTL
         )
         self._lock = threading.Lock()
         self._cache = self._load_cache()
@@ -319,6 +319,7 @@ class ThreatIntelligenceService:
         self._reach_ok_until = 0.0
         self._reach_bad_until = 0.0
 
+        self._probe_server = client is None       # an injected client is trusted as-is
         self._client = client if client is not None else self._make_client()
         if crawler is not None:
             self._crawler = crawler
@@ -337,7 +338,11 @@ class ThreatIntelligenceService:
     def update(self, *, force: bool = False, sources: Optional[tuple[ThreatSource, ...]] = None) -> dict:
         """Fetch changed source pages and queue their normalized evidence in Supermemory."""
         selected = sources or DEFAULT_SOURCES
-        report = {"fetched": 0, "cached": 0, "ingested": 0, "errors": [], "documents": []}
+        report = {"fetched": 0, "cached": 0, "ingested": 0, "errors": [], "documents": [],
+                  "stored_ids": []}
+        # Probe once: a configured-but-down Supermemory must not cost a timeout per source.
+        can_store = self._client is not None and (not self._probe_server or self._server_reachable())
+        report["supermemory"] = can_store
         if self._crawler is None:
             report["errors"].append("FIRECRAWL_API_KEY is not set")
             return report
@@ -359,8 +364,9 @@ class ThreatIntelligenceService:
                 self._save_cache()
                 report["fetched"] += 1
                 report["documents"].append(document)
-                if self._store(document):
+                if can_store and self._store(document):
                     report["ingested"] += 1
+                    report["stored_ids"].append(document["id"])
             except Exception as exc:
                 report["errors"].append(f"{source.name}: {str(exc)[:180]}")
         return report

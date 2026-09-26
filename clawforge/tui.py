@@ -41,6 +41,7 @@ HELP = """\
 
 [bold]Commands[/bold]
   /watch    live connections + agent + prompt on one screen (Esc to return)
+  /news     fetch live security news and store it in Supermemory · /news <query> searches it
   /status   re-run the preflight checks      /tools   tools and their approval tier
   /setup    register provider, connector, agent in TrueForge
   /new      start a fresh session            /quit    exit"""
@@ -67,6 +68,19 @@ def _http_status(url: str, method: str = "GET", timeout: float = 2.0) -> Optiona
         return None
 
 
+def _server_is_stale() -> str:
+    """Why the running MCP server has older code than what is on disk ('' if current)."""
+    import json
+    from clawforge.mcp_server import SERVER_STAMP, code_mtime
+    try:
+        stamp = json.loads(SERVER_STAMP.read_text(encoding="utf-8"))
+    except Exception:
+        return "started before code tracking existed"
+    if code_mtime() > float(stamp.get("code_mtime", 0)) + 1:
+        return "code changed since it started"
+    return ""
+
+
 def preflight() -> list[Check]:
     from clawforge.mcp_server import url as mcp_url
     harness.load_env()
@@ -88,6 +102,11 @@ def preflight() -> list[Check]:
                         f"{mcp_url()} (token enforced)" if mcp_status == 401 else
                         mcp_url() if mcp_up else f"not reachable at {mcp_url()}",
                         "" if mcp_up else "python -m clawforge serve   (in another terminal)"))
+    if mcp_up:
+        stale = _server_is_stale()
+        if stale:
+            checks[-1] = Check("ClawNet MCP server", False, f"running old code ({stale})",
+                               "restart it: Ctrl+C in its terminal, then python -m clawforge serve")
 
     if tf_up:
         try:
@@ -105,13 +124,12 @@ def preflight() -> list[Check]:
         checks.append(Check("Agent registered", False, "needs TrueForge first", "start TrueForge, then /setup"))
 
     try:
-        from sandbox import _docker_available
-        docker = _docker_available()
-    except Exception:
-        docker = False
-    checks.append(Check("Docker sandbox", True if docker else None,
-                        "daemon running" if docker else "not running — sandbox tools will report an error",
-                        "" if docker else "start Docker Desktop"))
+        from sandbox import sandbox_available
+        sb_ok, sb_desc = sandbox_available()
+    except Exception as exc:
+        sb_ok, sb_desc = False, f"sandbox check failed: {exc}"
+    checks.append(Check("Sandbox", True if sb_ok else None, sb_desc,
+                        "" if sb_ok else "set DAYTONA_API_KEY in .env, or start Docker Desktop"))
     return checks
 
 
@@ -152,12 +170,83 @@ def tools_panel() -> Panel:
     t.add_column("tool", style="cyan")
     t.add_column("gate")
     colours = {"OBSERVE": "green", "EXECUTE": "blue", "CONTROL": "red"}
-    gates = {"OBSERVE": "autonomous", "EXECUTE": "autonomous (Docker sandbox)",
+    gates = {"OBSERVE": "autonomous", "EXECUTE": "autonomous (Daytona sandbox)",
              "CONTROL": "[bold red]human approval, every call[/bold red]"}
     for tool in asyncio.run(mcp.list_tools()):
         tr = harness.tier(tool.name)
         t.add_row(f"[{colours[tr]}]{tr}[/{colours[tr]}]", tool.name, gates[tr])
     return Panel(t, title="[bold]ClawNet tools[/bold]", border_style="bright_black")
+
+
+def _readable(summary: str) -> str:
+    """Display-only cleanup of crawled markdown (the stored document is untouched)."""
+    import re
+    text = re.sub(r"!\[[^\]]*\]\([^)]*\)", " ", summary or "")          # images
+    text = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", text)               # links -> text
+    text = re.sub(r"<br\s*/?>?|\\+|[|#*`>_]+|\"\w+\"\s*:\s*|\",", " ", text)  # tables, escapes, json keys
+    return re.sub(r"\s+", " ", text).strip(' "')
+
+
+def _news_table(documents: list, stored_ids: Optional[set] = None) -> Table:
+    t = Table(box=None, padding=(0, 1), expand=True, header_style="bold bright_cyan")
+    t.add_column("SOURCE", style="cyan", no_wrap=True, max_width=28, overflow="ellipsis")
+    t.add_column("PUBLISHED", no_wrap=True, width=10)
+    t.add_column("CVEs", no_wrap=True, max_width=26, overflow="ellipsis")
+    t.add_column("EXPLOITED", width=9)
+    t.add_column("SUMMARY", ratio=1, no_wrap=True, overflow="ellipsis")
+    if stored_ids is not None:
+        t.add_column("STORED", width=11)
+    for d in documents:
+        cves = d.get("cves") or []
+        row = [
+            (d.get("source") or {}).get("name", "?"),
+            (d.get("publication_date") or "—")[:10],
+            (", ".join(cves[:2]) + (f" +{len(cves) - 2}" if len(cves) > 2 else "")) or "—",
+            "[bold red]yes[/bold red]" if d.get("exploit_available") else "[dim]no[/dim]",
+            _readable(d.get("summary") or ""),
+        ]
+        if stored_ids is not None:
+            row.append("[green]supermemory[/green]" if d.get("id") in stored_ids else "[yellow]cache[/yellow]")
+        t.add_row(*row)
+    return t
+
+
+def fetch_news() -> Panel:
+    """/news: crawl the live security sources now and store each item in Supermemory."""
+    harness.load_env()
+    import web_search
+    svc = web_search._get_service()
+    report = svc.update(force=True)
+    url = os.environ.get("SUPERMEMORY_API_URL", "http://localhost:6767")
+    lines = [f"fetched [bold]{report['fetched']}[/bold] source(s) live"]
+    if report.get("supermemory"):
+        lines.append(f"[green]{report['ingested']} stored in Supermemory[/green] ({url})")
+    elif svc.available:
+        lines.append(f"[yellow]Supermemory not reachable at {url}: kept in the local cache only.[/yellow] "
+                     "Start it: [bold]bash scripts/supermemory-local.sh[/bold], then /news again")
+    else:
+        lines.append("[yellow]SUPERMEMORY_API_KEY not set: kept in the local cache only[/yellow]")
+    for err in report["errors"][:5]:
+        lines.append(f"[red]✗[/red] {err}")
+    body = Group(_news_table(report["documents"], set(report.get("stored_ids", []))),
+                 Text.from_markup("\n" + "  ·  ".join(lines[:2])),
+                 *[Text.from_markup(l) for l in lines[2:]])
+    return Panel(body, title="[bold]Security news[/bold]  [dim]CISA · NVD · MITRE · GitHub · MSRC · "
+                             "Unit 42 · Malwarebytes · Talos[/dim]", border_style="bright_cyan")
+
+
+def search_news(query: str) -> Panel:
+    """/news <query>: search what is already stored (Supermemory first, then the local cache)."""
+    harness.load_env()
+    import web_search
+    docs = web_search.search_memory(query, limit=10)
+    body = _news_table(docs) if docs else Text.from_markup(
+        f"[dim]Nothing stored matches '{query}'. Run /news to fetch the latest first.[/dim]")
+    return Panel(body, title=f"[bold]Stored news matching[/bold] '{query}'", border_style="bright_black")
+
+
+def news(arg: str) -> Panel:
+    return search_news(arg) if arg else fetch_news()
 
 
 def watch() -> None:
@@ -199,6 +288,11 @@ def main() -> None:
             console.print(tools_panel())
         elif cmd == "/watch":
             watch()
+        elif cmd == "/news" or cmd.startswith("/news "):
+            with console.status("[dim]fetching live security news…[/dim]" if cmd == "/news"
+                                else "[dim]searching stored news…[/dim]"):
+                panel = news(msg[5:].strip())
+            console.print(panel)
         elif cmd == "/setup":
             _setup()
         elif cmd == "/new":

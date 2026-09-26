@@ -80,7 +80,14 @@ How to work:
    lookup_evidence and threat_intel.
 3. EXECUTE: when you need to run code (a probe, a parser, a repro, or a repository
    you were asked to vet), use sandbox_run_code, sandbox_run_path or sandbox_clone.
-   Code runs in ClawNet's Docker sandbox and never on the host.
+   Code runs in ClawNet's sandbox (an ephemeral Daytona sandbox, Docker as fallback)
+   and never on the host.
+   To vet a local file or folder, call sandbox_run_path with its path. To vet a git
+   URL, call sandbox_clone (append .git if it is missing). If the result says
+   executed=false, nothing ran: read the file list, choose the entry command
+   (e.g. "python open.py"), and call the tool again with `command`. Never report
+   an unexecuted run as safe, and never tell the user to run it on the host until
+   an executed sandbox run is done.
 4. ANALYZE: tie every claim to a tool result, citing rule names, scores, PIDs and IPs.
 5. CONTROL: kill_process, suspend_process, block_ip, quarantine_file, close_port and
    promote_sandbox_run change the host. Before any of them, call preview_action and
@@ -111,7 +118,7 @@ def manifest() -> dict:
             "preload": True,
         }],
         "config": {
-            # ClawNet's Docker sandbox is the execution environment, so TrueForge's
+            # ClawNet's sandbox (Daytona / Docker) is the execution environment, so TrueForge's
             # own sandbox (Daytona) is not needed.
             "sandbox": {"enabled": False},
             "ask_user_questions": {"enabled": True},
@@ -144,7 +151,7 @@ def setup() -> None:
 
     c.settings.mcp_servers.create_or_update(manifest=RemoteMcpServerManifest(
         type="remote", name=MCP_NAME, url=mcp_url(),
-        description="ClawNet: host network monitor, policy engine, Docker sandbox, "
+        description="ClawNet: host network monitor, policy engine, Daytona sandbox, "
                     "evidence memory and guarded security actions.",
         auth=McpServerHeaderAuth(type="header", headers={"Authorization": f"Bearer {mcp_token()}"}),
     ))

@@ -423,7 +423,21 @@ def _detect_start_command(workspace: Path) -> str:
         return "pip install -e . && python -m pytest -q || true"
     if (workspace / "package.json").exists():
         return "npm install && npm run start || npm run dev || npm test || true"
-    return "ls -la && echo 'No known runtime entrypoint found.'"
+    # No manifest: run a conventional entry file, or the only script there is.
+    for entry, runner in (("main.py", "python"), ("app.py", "python"), ("__main__.py", "python"),
+                          ("index.js", "node"), ("main.js", "node"), ("run.sh", "sh"), ("main.sh", "sh")):
+        if (workspace / entry).is_file():
+            return f"{runner} {entry}"
+    for pattern, runner in (("*.py", "python"), ("*.js", "node"), ("*.sh", "sh")):
+        scripts = sorted(p.name for p in workspace.glob(pattern) if p.is_file())
+        if len(scripts) == 1:
+            return f"{runner} '{scripts[0]}'"
+    return NO_ENTRYPOINT
+
+
+# Fallback when nothing runnable is found. Callers check for it: a run that only
+# listed files proves nothing and must not read as a SAFE verdict.
+NO_ENTRYPOINT = "ls -la && echo 'No known runtime entrypoint found.'"
 
 
 def _agent_path() -> Path:
@@ -859,6 +873,134 @@ def _ai_sandbox_explain(level: str, score: int, reasons: list[str], meta: dict) 
         return ""
 
 
+# ── sandbox backends: Daytona (primary) · Docker (fallback) ───────────────────
+
+_DAYTONA_SKIP_DIRS = {".git", "node_modules", "__pycache__", ".venv", "venv"}
+_DAYTONA_MAX_UPLOAD = 50 * 1024 * 1024
+
+
+def sandbox_backend(policy: Optional[dict] = None) -> str:
+    """Which sandbox runs the code. Daytona is primary whenever it is configured.
+
+    CLAWNET_SANDBOX_BACKEND=daytona|docker forces one; otherwise a DAYTONA_API_KEY
+    selects Daytona, and local Docker is the fallback.
+    """
+    forced = os.environ.get("CLAWNET_SANDBOX_BACKEND", "").strip().lower()
+    if forced in ("daytona", "docker"):
+        return forced
+    if os.environ.get("DAYTONA_API_KEY", "").strip():
+        return "daytona"
+    return "docker"
+
+
+def sandbox_available() -> tuple[bool, str]:
+    """(usable, description) for the backend that would run next."""
+    if sandbox_backend() == "daytona":
+        try:
+            import daytona  # noqa: F401
+        except ImportError:
+            return _docker_available(), "Daytona selected but the `daytona` package is missing (pip install daytona)"
+        return True, "Daytona (cloud sandbox), Docker fallback" + ("" if _docker_available() else " unavailable")
+    return _docker_available(), "Docker (local)" if _docker_available() else "Docker not running"
+
+
+def _run_daytona(workspace: Path, sandbox_dir: Path, user_command: str, policy: dict,
+                 canary: str, run_id: str, timeout_sec: int, stdout_path: Path,
+                 stderr_path: Path) -> tuple[int, bool, dict]:
+    """Run the target in a fresh, ephemeral Daytona sandbox with ClawNet's telemetry agent.
+
+    Same contract as the Docker path: the quarantined copy (never your working tree)
+    goes in, the target runs under container_agent.py, and behavior.json +
+    live-alerts.log + stdout come back into sandbox_dir for the policy engine.
+    Host env vars are never forwarded; denied keys are blanked, canary keys get the
+    per-run canary. The sandbox is deleted afterwards (CLAWNET_DAYTONA_KEEP=1 keeps
+    it for inspection in the Daytona dashboard, auto-deleted after 30 minutes).
+    """
+    import shlex
+    from daytona import (CreateSandboxFromSnapshotParams, Daytona, DaytonaConfig,
+                         DaytonaTimeoutError, FileUpload)
+
+    keep = os.environ.get("CLAWNET_DAYTONA_KEEP", "").lower() in ("1", "true", "yes")
+    client = Daytona(DaytonaConfig(
+        api_key=os.environ["DAYTONA_API_KEY"],
+        api_url=os.environ.get("DAYTONA_API_URL") or None,
+        target=os.environ.get("DAYTONA_TARGET") or None,
+    ))
+
+    env: dict[str, str] = {}
+    canary_keys = set(policy.get("canary_env_keys", [])) if canary else set()
+    for key in policy.get("deny_env_keys", []):
+        if key not in canary_keys:
+            env[key] = ""
+    for key in canary_keys:
+        env[key] = canary
+    env.update({"PYTHONDONTWRITEBYTECODE": "1", "PYTHONUNBUFFERED": "1"})
+
+    params = CreateSandboxFromSnapshotParams(
+        language="python",
+        env_vars=env,
+        labels={"clawnet": "sandbox", "run_id": run_id},
+        network_block_all=str(policy.get("network_mode", "bridge")) == "none",
+        ephemeral=not keep,
+        auto_stop_interval=30 if keep else 15,
+        **({"auto_delete_interval": 30} if keep else {}),
+    )
+    sandbox = client.create(params, timeout=180)
+    info = {"backend": "daytona", "sandbox_id": sandbox.id, "kept": keep}
+    try:
+        home = sandbox.get_user_home_dir() or "/home/daytona"
+        base = f"{home}/clawnet"
+        ws, out = f"{base}/workspace", f"{base}/out"
+        sandbox.process.exec(f"mkdir -p {shlex.quote(ws)} {shlex.quote(out)}", timeout=30)
+
+        uploads, total = [], 0
+        for path in sorted(workspace.rglob("*")):
+            rel = path.relative_to(workspace)
+            if not path.is_file() or any(part in _DAYTONA_SKIP_DIRS for part in rel.parts):
+                continue
+            total += path.stat().st_size
+            if total > _DAYTONA_MAX_UPLOAD:
+                raise RuntimeError("target is larger than 50 MB; too big for a Daytona sandbox run")
+            uploads.append(FileUpload(source=path.read_bytes(), destination=f"{ws}/{rel.as_posix()}"))
+        uploads.append(FileUpload(source=_agent_path().read_bytes(), destination=f"{base}/agent.py"))
+        uploads.append(FileUpload(source=(sandbox_dir / "agent-config.json").read_bytes(),
+                                  destination=f"{base}/config.json"))
+        sandbox.fs.upload_files(uploads)
+
+        # coreutils `timeout` bounds the target, so the agent survives to write its
+        # report; exit 124 means the target was cut off.
+        inner = f"timeout -k 5 {int(timeout_sec)} sh -c {shlex.quote(user_command)}"
+        run = (f"cd {shlex.quote(ws)} && CLAWNET_OUT={shlex.quote(out)} "
+               f"CLAWNET_AGENT_CFG={shlex.quote(base + '/config.json')} "
+               f"python3 {shlex.quote(base + '/agent.py')} {shlex.quote(inner)}")
+        timed_out = False
+        try:
+            resp = sandbox.process.exec(f"sh -c {shlex.quote(run)}", timeout=int(timeout_sec) + 60)
+            exit_code = int(resp.exit_code if resp.exit_code is not None else 1)
+            stdout_path.write_text(resp.result or "", encoding="utf-8")
+        except DaytonaTimeoutError:
+            timed_out, exit_code = True, 124
+            stdout_path.write_text("", encoding="utf-8")
+        if exit_code == 124:
+            timed_out = True
+        stderr_path.write_text("" if not timed_out else "[clawnet] timed out", encoding="utf-8")
+
+        for name in ("behavior.json", "live-alerts.log"):
+            try:
+                data = sandbox.fs.download_file(f"{out}/{name}")
+                if data:
+                    (sandbox_dir / name).write_bytes(data)
+            except Exception:
+                pass
+        return exit_code, timed_out, info
+    finally:
+        if not keep:
+            try:
+                client.delete(sandbox)
+            except Exception:
+                pass
+
+
 class SandboxRunner:
     def __init__(self) -> None:
         self._mem = SuperMemory() if SuperMemory is not None else None
@@ -913,8 +1055,8 @@ class SandboxRunner:
         source = Path(target_path).resolve()
         if not source.exists():
             raise FileNotFoundError(f"Target path not found: {source}")
-        if shutil.which("docker") is None:
-            raise RuntimeError("Docker CLI not found in PATH.")
+        if sandbox_backend() == "docker" and shutil.which("docker") is None:
+            raise RuntimeError("No sandbox: set DAYTONA_API_KEY (primary) or install Docker (fallback).")
 
         run_id = f"sbx-{int(time.time())}"
         sandbox_dir = Path(tempfile.mkdtemp(prefix=f"clawnet-{run_id}-"))
@@ -992,14 +1134,33 @@ class SandboxRunner:
                   if policy.get("plant_decoy_credentials", True) else "")
 
         _write_agent_config(sandbox_dir, source.name, canary)
-        cmd = _build_run_cmd(
-            str(policy.get("backend", "docker")),
-            workspace, sandbox_dir, container_name, user_command, policy, canary,
-        )
 
         timed_out = False
         exit_code = 0
-        if stream:
+        backend = sandbox_backend(policy)
+        backend_info: dict = {"backend": backend}
+        if backend == "daytona":
+            console.print(f"[cyan]Sandbox:[/cyan] Daytona  ·  {user_command}")
+            try:
+                exit_code, timed_out, backend_info = _run_daytona(
+                    workspace, sandbox_dir, user_command, policy, canary, run_id,
+                    int(policy.get("max_runtime_seconds", 300)), stdout_path, stderr_path,
+                )
+            except Exception as exc:
+                if not _docker_available():
+                    raise RuntimeError(f"Daytona sandbox failed ({exc}) and Docker fallback is not running")
+                console.print(f"[yellow]Daytona failed ({exc}) — falling back to Docker[/yellow]")
+                backend = "docker"
+                backend_info = {"backend": "docker", "fallback_reason": str(exc)[:300]}
+
+        if backend == "docker":
+            cmd = _build_run_cmd(
+                str(policy.get("backend", "docker")) if policy.get("backend") in _BACKENDS else "docker",
+                workspace, sandbox_dir, container_name, user_command, policy, canary,
+            )
+            backend_info.setdefault("container", container_name)
+
+        if backend == "docker" and stream:
             live_view = _SandboxLiveView(
                 target=str(source),
                 container_name=container_name,
@@ -1015,7 +1176,7 @@ class SandboxRunner:
                 container_name=container_name,
                 live_view=live_view,
             )
-        else:
+        elif backend == "docker":
             try:
                 proc = subprocess.run(
                     cmd,
@@ -1156,6 +1317,7 @@ class SandboxRunner:
             "target": str(source),
             "run_id": run_id,
             "runtime_command": user_command,
+            "sandbox": backend_info,
             "exit_code": exit_code,
             "timed_out": timed_out,
             "stdout_sha256": _sha256_text(stdout),
