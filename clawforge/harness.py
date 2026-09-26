@@ -279,6 +279,27 @@ def _content_text(content: Any) -> str:
     return "".join(parts)
 
 
+def _announce_calls(events: dict, announced: set, hs: HarnessState, printed_main: bool) -> bool:
+    for ev in list(events.values()):
+        if getattr(ev, "type", "") != "model.message":
+            continue
+        for tc in (ev.tool_calls or []):
+            if tc.id in announced or not tc.function.name:
+                continue
+            announced.add(tc.id)
+            name = getattr(tc.tool_info, "name", None) or tc.function.name
+            if printed_main:
+                console.print()
+                printed_main = False
+            tr = tier(name)
+            if tr == "CONTROL":
+                console.print(f"[yellow]⚑ {name}[/yellow] [dim](awaiting approval)[/dim]")
+            else:
+                hs.to("EXECUTING" if tr == "EXECUTE" else "OBSERVING", name)
+                console.print(f"[cyan]→ {name}[/cyan] [dim]{(tc.function.arguments or '')[:160]}[/dim]")
+    return printed_main
+
+
 def _stream(c, session_id: str, turn_input: list, hs: HarnessState) -> tuple[list, list, Any]:
     """Stream one turn. Returns (pending approvals, pending questions, final state)."""
     from trueforge_sdk.events import is_event_delta, merge_event_delta
@@ -287,6 +308,7 @@ def _stream(c, session_id: str, turn_input: list, hs: HarnessState) -> tuple[lis
     questions: list = []
     final = None
     printed_main = False
+    announced: set = set()
     stream = c.sessions.create_turn_stream(session_id=session_id, input=turn_input)
     for event in stream:
         if is_event_delta(event):
@@ -299,20 +321,14 @@ def _stream(c, session_id: str, turn_input: list, hs: HarnessState) -> tuple[lis
             continue
         events[event.id] = event
         et = event.type
+        # Tool calls stream in as deltas, so a model.message is only complete once
+        # the next non-delta event arrives: announce its calls now.
+        printed_main = _announce_calls(events, announced, hs, printed_main)
         if et == "thread.created":
             console.print(f"\n[magenta]↳ subagent[/magenta] {getattr(event, 'title', '')}")
-        elif et == "model.message":
-            for tc in (event.tool_calls or []):
-                name = getattr(tc.tool_info, "name", None) or tc.function.name
-                tr = tier(name)
-                if printed_main:
-                    console.print()
-                    printed_main = False
-                if tr == "CONTROL":
-                    console.print(f"[yellow]⚑ {name}[/yellow] [dim](awaiting approval)[/dim]")
-                else:
-                    hs.to("EXECUTING" if tr == "EXECUTE" else "OBSERVING", name)
-                    console.print(f"[cyan]→ {name}[/cyan] [dim]{tc.function.arguments[:160]}[/dim]")
+        elif et == "model.message" and event.thread_id == "main" and printed_main:
+            console.print("\n")
+            printed_main = False
         elif et == "tool.response":
             if hs.state in ("OBSERVING", "EXECUTING", "APPROVED", "STOP"):
                 hs.to("ANALYZING")

@@ -12,6 +12,12 @@ CORE_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__
 if CORE_DIR not in sys.path:
     sys.path.insert(0, CORE_DIR)
 
+import logging
+
+# The MCP / TrueForge SDKs log every HTTP request at INFO; keep the console clean.
+for _name in ("httpx", "httpcore", "mcp", "uvicorn"):
+    logging.getLogger(_name).setLevel(logging.WARNING)
+
 if sys.platform == "win32":        # same UTF-8 console setup as the ClawNet monitor
     try:
         import ctypes

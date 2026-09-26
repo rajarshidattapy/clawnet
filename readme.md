@@ -139,16 +139,19 @@ python -m venv .venv && .venv\Scripts\activate
 pip install -r core/requirements.txt
 copy .env.example .env                       # set OPENAI_API_KEY
 
-# terminal 1 — the agent harness
-npx @truefoundry/trueforge@latest            # http://localhost:8790
+# terminal 1 — the agent harness (installs TrueForge into .trueforge/ on first run)
+python -m clawforge trueforge                # http://localhost:8790
 
 # terminal 2 — ClawNet's capabilities as MCP tools
 python -m clawforge serve                    # http://127.0.0.1:8765/mcp (bearer token)
 
-# terminal 3 — wire them together, then hand over a job
-python -m clawforge setup                    # OpenAI provider + `clawnet` connector + `clawforge` agent
-python -m clawforge run "Which processes on this machine look suspicious? Contain anything that is."
+# terminal 3 — the ClawForge console: status checks, first-run setup, then chat with the agent
+python -m clawforge
 ```
+
+`python -m clawforge trueforge` is used instead of `npx @truefoundry/trueforge`. On Windows, npm 11's `npx` install lock times out on a package this size (`npm error code ECOMPROMISED` / `Lock compromised`). The command also allowlists the local MCP host (`OUTBOUND_URL_ALLOWED_HOSTS`), because TrueForge blocks loopback MCP URLs by default.
+
+One-shot mode: `python -m clawforge run "Which processes look suspicious? Contain anything that is."`
 
 You can also open the TrueForge chat UI, pick the `clawforge` agent, and approve with **Allow / Deny** there. `clawnet forge <cmd>` works the same way as `python -m clawforge <cmd>`.
 

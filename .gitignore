@@ -220,3 +220,5 @@ __marimo__/
 
 clawnet.egg-info/
 k8agent/
+# local TrueForge runtime (python -m clawforge trueforge)
+.trueforge/
