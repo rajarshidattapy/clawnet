@@ -252,15 +252,25 @@ def _render_briefing(tool: str, args: dict, brief: dict) -> None:
                         border_style="yellow"))
 
 
-def ask_human(tool: str, args: dict) -> tuple[bool, str]:
+def _prompt_decision(tool: str, args: dict, brief: dict) -> tuple[bool, str]:
+    answer = Prompt.ask("Approve?", choices=["y", "n"], default="n")
+    approved = answer == "y"
+    reason = "" if approved else (Prompt.ask("Reason for denial", default="denied by operator") or "denied")
+    return approved, reason
+
+
+def ask_human(tool: str, args: dict, decide=None) -> tuple[bool, str]:
+    """Show the measured briefing, then get the human's decision.
+
+    `decide(tool, args, brief) -> (approved, reason)` lets another UI (the /watch
+    dashboard) collect the answer; the default asks on the terminal.
+    """
     import policy
     brief = briefing(tool, args)
     _render_briefing(tool, args, brief)
     if brief.get("guardrail") not in ("allowed", "per-process (see blast_radius)"):
         console.print("[red]ClawNet's guardrail will refuse this action even if you approve it.[/red]")
-    answer = Prompt.ask("Approve?", choices=["y", "n"], default="n")
-    approved = answer == "y"
-    reason = "" if approved else (Prompt.ask("Reason for denial", default="denied by operator") or "denied")
+    approved, reason = (decide or _prompt_decision)(tool, args, brief)
     policy.log_decision("harness_approval", tool=tool, args={k: v for k, v in args.items() if k != "reason"},
                         approved=approved, reason=reason, approved_by="clawforge-cli")
     return approved, reason
@@ -353,8 +363,12 @@ def _stream(c, session_id: str, turn_input: list, hs: HarnessState) -> tuple[lis
     return approvals, questions, final
 
 
-def run(task: str, session_id: Optional[str] = None) -> str:
-    """Run one task to completion, pausing at every approval checkpoint."""
+def run(task: str, session_id: Optional[str] = None, *, decide=None, reply=None,
+        hs: Optional[HarnessState] = None) -> str:
+    """Run one task to completion, pausing at every approval checkpoint.
+
+    decide / reply: optional callbacks for approvals and agent questions (default:
+    terminal prompts). hs: pass a HarnessState to observe it from another thread."""
     import policy
     load_env()
     c = client()
@@ -363,7 +377,9 @@ def run(task: str, session_id: Optional[str] = None) -> str:
         policy.log_decision("harness_session", session_id=session_id, task=policy.scrub(task, 300))
     console.print(Panel(task, title=f"[bold bright_cyan]ClawForge[/bold bright_cyan]  session {session_id}",
                         border_style="bright_cyan"))
-    hs = HarnessState()
+    hs = hs if hs is not None else HarnessState()
+    if hs.state != "PLANNING":
+        hs.state = "DONE"
     hs.to("PLANNING")
     turn_input: list = [{"type": "user.message", "content": task}]
 
@@ -382,7 +398,7 @@ def run(task: str, session_id: Optional[str] = None) -> str:
             except json.JSONDecodeError:
                 args = {"raw": call.function.arguments}
             hs.to("APPROVAL", name)
-            ok, why = ask_human(name, args)
+            ok, why = ask_human(name, args, decide)
             hs.to("APPROVED" if ok else "REJECTED", name)
             if not ok:
                 hs.to("STOP", "agent told not to retry")
@@ -397,7 +413,7 @@ def run(task: str, session_id: Optional[str] = None) -> str:
                 args = json.loads(call.function.arguments or "{}")
             except json.JSONDecodeError:
                 args = {}
-            answer = _answer_question(args)
+            answer = _answer_question(args, reply)
             turn_input.append({"type": "user.tool_response", "thread_id": thread_id,
                                "tool_call_id": call_id, "content": answer})
 
@@ -405,13 +421,13 @@ def run(task: str, session_id: Optional[str] = None) -> str:
     return session_id
 
 
-def _answer_question(args: dict) -> str:
+def _answer_question(args: dict, reply=None) -> str:
     """TrueForge's ask_user_question: {question, options[]}; the answer is free text."""
     text = args.get("question", "The agent has a question")
     opts = [str(o) for o in (args.get("options") or [])]
     body = text + ("\n" + "\n".join(f"  {i + 1}. {o}" for i, o in enumerate(opts)) if opts else "")
     console.print(Panel(body, title="[bold]Agent question[/bold]", border_style="magenta"))
-    raw = Prompt.ask("Answer (number or text)")
+    raw = reply(text, opts) if reply else Prompt.ask("Answer (number or text)")
     return opts[int(raw) - 1] if raw.isdigit() and 0 < int(raw) <= len(opts) else raw
 
 

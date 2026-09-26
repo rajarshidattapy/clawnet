@@ -110,3 +110,27 @@ def test_harness_owns_the_state_machine():
     for s in ("APPROVAL", "REJECTED", "STOP"):
         rejected.to(s)
     assert [h[1] for h in rejected.history] == ["APPROVAL", "REJECTED", "STOP"]
+
+
+def test_watch_dashboard_answers_approvals_from_the_prompt_box():
+    import threading
+    from rich.console import Console
+    from clawforge.dashboard import Dashboard
+
+    d = Dashboard(Console(width=120, height=40, force_terminal=True, color_system=None))
+    out = {}
+    t = threading.Thread(target=lambda: out.update(r=d._decide("block_ip", {"ip": "203.0.113.9"}, {})))
+    t.start()
+    for _ in range(50):
+        if d.mode == "approve":
+            break
+        threading.Event().wait(0.02)
+    d._key(b"x", None)                      # ignored while an approval is pending
+    d._key(b"n", None)
+    t.join(2)
+    assert out["r"] == (False, "denied by operator") and d.mode == "prompt"
+
+    for ch in b"/new":
+        d._key(bytes([ch]), None)
+    assert d._key(b"\r", None) is True and d.session_id is None
+    assert d._key(b"\x1b", None) is False   # Esc on an empty prompt leaves /watch

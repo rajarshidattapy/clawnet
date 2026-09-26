@@ -40,6 +40,7 @@ HELP = """\
   [cyan]Vet https://github.com/someone/tool.git in the sandbox before I install it[/cyan]
 
 [bold]Commands[/bold]
+  /watch    live connections + agent + prompt on one screen (Esc to return)
   /status   re-run the preflight checks      /tools   tools and their approval tier
   /setup    register provider, connector, agent in TrueForge
   /new      start a fresh session            /quit    exit"""
@@ -159,6 +160,12 @@ def tools_panel() -> Panel:
     return Panel(t, title="[bold]ClawNet tools[/bold]", border_style="bright_black")
 
 
+def watch() -> None:
+    """Live connections + agent output + prompt on one screen (clawforge/dashboard.py)."""
+    from clawforge.dashboard import watch as run_dashboard
+    run_dashboard(console)
+
+
 def main() -> None:
     console.print(header())
     with console.status("[dim]checking harness…[/dim]"):
@@ -190,6 +197,8 @@ def main() -> None:
             console.print(status_panel(checks))
         elif cmd == "/tools":
             console.print(tools_panel())
+        elif cmd == "/watch":
+            watch()
         elif cmd == "/setup":
             _setup()
         elif cmd == "/new":
