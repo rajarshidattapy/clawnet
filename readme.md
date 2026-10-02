@@ -134,6 +134,10 @@ The agent **does not directly control the machine**.
 
 Requires Windows, Python 3.10+, Node 22.14+, an OpenAI API key, and a sandbox: a **Daytona** API key (primary, `DAYTONA_API_KEY`) and/or Docker Desktop (fallback).
 
+**One command:** `.\start.ps1` (or `start.cmd`). It creates the venv if missing, opens TrueForge and the MCP server in their own terminal tabs, waits until both answer, registers the agent, then opens the console in the current terminal. Servers already running are reused, and an MCP server with stale code is restarted. Flags: `-Supermemory` (also start Supermemory Local in WSL), `-ServersOnly`, `-Restart`, `-NewWindows`, `-SkipSetup`.
+
+Or by hand:
+
 ```bash
 python -m venv .venv && .venv\Scripts\activate
 pip install -r core/requirements.txt
