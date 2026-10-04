@@ -3,6 +3,7 @@ rich>=13.0
 python-telegram-bot>=20.0
 send2trash>=1.8
 supermemory>=3.0
+serpapi>=1.0
 mcp>=1.10,<2
 trueforge-sdk>=0.2
 daytona>=0.200

@@ -41,7 +41,7 @@ HELP = """\
 
 [bold]Commands[/bold]
   /watch    live connections + agent + prompt on one screen (Esc to return)
-  /news     fetch live security news and store it in Supermemory · /news <query> searches it
+  /news     fetch live security news and store it in Supermemory · /news <query> searches the web
   /status   re-run the preflight checks      /tools   tools and their approval tier
   /setup    register provider, connector, agent in TrueForge
   /new      start a fresh session            /quit    exit"""
@@ -236,13 +236,15 @@ def fetch_news() -> Panel:
 
 
 def search_news(query: str) -> Panel:
-    """/news <query>: search what is already stored (Supermemory first, then the local cache)."""
+    """/news <query>: live web search (SerpApi, then Firecrawl), else what is already stored."""
     harness.load_env()
     import web_search
     docs = web_search.search_memory(query, limit=10)
     body = _news_table(docs) if docs else Text.from_markup(
-        f"[dim]Nothing stored matches '{query}'. Run /news to fetch the latest first.[/dim]")
-    return Panel(body, title=f"[bold]Stored news matching[/bold] '{query}'", border_style="bright_black")
+        f"[dim]Nothing matches '{query}'. Run /news to fetch the latest first.[/dim]")
+    via = docs[0].get("provider", "cache") if docs else "cache"
+    return Panel(body, title=f"[bold]News matching[/bold] '{query}'  [dim]via {via}[/dim]",
+                 border_style="bright_black")
 
 
 def news(arg: str) -> Panel:

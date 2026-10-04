@@ -81,3 +81,82 @@ def test_threat_intelligence_uses_structured_supermemory_evidence(tmp_path):
     payload = policy.llm_payload(evidence, policy.evaluate(evidence))
     assert payload["threat_intelligence"]["matching_cves"] == ["CVE-2025-12345"]
     assert "CVE-2025-12345" in str(payload)
+
+
+_SERP_MD = """\
+## Organic Results
+
+| # | Title | Snippet | Source |
+| --- | --- | --- | --- |
+| 1 | [CVE-2025-12345 advisory](https://vendor.example/cve-2025-12345) | CVE-2025-12345 is actively exploited in the wild. CVSS: 9.8. | Vendor |
+| 2 | [Patch notes](https://news.example/patch) | Security update for demo-package. | News |
+"""
+
+
+class _SerpApiClient:
+    """Stands in for `serpapi.Client`; records the params it was called with."""
+
+    calls: list = []
+    response = _SERP_MD
+
+    def __init__(self, *, api_key=None, timeout=None):
+        self.api_key = api_key
+
+    def search(self, params):
+        _SerpApiClient.calls.append(params)
+        if isinstance(self.response, Exception):
+            raise self.response
+        return self.response
+
+
+class _SearchingCrawler(_Crawler):
+    def __init__(self) -> None:
+        super().__init__()
+        self.searches = []
+
+    def search(self, query, limit=10):
+        self.searches.append(query)
+        return [web_search._web_document("firecrawl", "Firecrawl hit", "https://fc.example/a",
+                                         f"{query} seen in a malware campaign")]
+
+
+def _live_service(tmp_path, monkeypatch, response):
+    monkeypatch.setenv("SERPAPI_KEY", "test-key")
+    monkeypatch.setitem(sys.modules, "serpapi", SimpleNamespace(Client=_SerpApiClient))
+    monkeypatch.setattr(_SerpApiClient, "calls", [])
+    monkeypatch.setattr(_SerpApiClient, "response", response)
+    crawler = _SearchingCrawler()
+    service = web_search.ThreatIntelligenceService(
+        cache_path=tmp_path / "threat_cache.json", crawler=crawler, client=_Client(),
+    )
+    return service, crawler
+
+
+def test_search_uses_serpapi_first(tmp_path, monkeypatch):
+    service, crawler = _live_service(tmp_path, monkeypatch, _SERP_MD)
+
+    results = service.search("CVE-2025-12345")
+
+    assert _SerpApiClient.calls == [{"engine": "google", "q": "CVE-2025-12345", "output": "md"}]
+    assert crawler.searches == []
+    assert [r["provider"] for r in results] == ["serpapi", "serpapi"]
+    assert results[0]["source"]["url"] == "https://vendor.example/cve-2025-12345"
+    assert results[0]["cves"] == ["CVE-2025-12345"]
+    assert results[0]["exploit_available"] is True
+
+
+def test_search_falls_back_to_firecrawl_then_cache(tmp_path, monkeypatch):
+    service, crawler = _live_service(tmp_path, monkeypatch, RuntimeError("quota exhausted"))
+
+    results = service.search("45.33.32.156")
+    assert len(_SerpApiClient.calls) == 1
+    assert crawler.searches == ["45.33.32.156"]
+    assert [r["provider"] for r in results] == ["firecrawl"]
+    # A snippet saying "malware" must not become an IOC reputation verdict.
+    assert service.enrich("ip", "45.33.32.156")["ioc_reputation"] == []
+
+    # Both live providers down: the existing stored-evidence path still answers.
+    service.update(sources=(web_search.ThreatSource("Test Advisory", "https://trusted.example/a", "advisory"),))
+    crawler.search = lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("firecrawl down"))
+    results = service.search("45.33.32.156")
+    assert results and {r["provider"] for r in results} == {"cache"}

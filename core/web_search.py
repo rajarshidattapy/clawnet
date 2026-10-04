@@ -1,4 +1,6 @@
-"""Threat intelligence retrieval backed by Firecrawl and Supermemory Local.
+"""Threat intelligence retrieval backed by SerpApi, Firecrawl and Supermemory Local.
+
+Live search: SerpApi -> Firecrawl search -> Supermemory / local crawl cache.
 
 This module is the only ClawNet integration point for web crawling and
 Supermemory. It stores deterministic, normalized source evidence only; callers
@@ -146,6 +148,67 @@ class FirecrawlProvider:
         metadata = data.get("metadata") or {}
         return FetchedPage(content=content, metadata=metadata if isinstance(metadata, dict) else {})
 
+    def search(self, query: str, limit: int = 10) -> list[dict]:
+        """Live web search (Firecrawl /v2/search), normalized like SerpApi results."""
+        request = urllib.request.Request(
+            "https://api.firecrawl.dev/v2/search",
+            data=json.dumps({"query": query, "limit": max(1, limit)}).encode("utf-8"),
+            headers={"Authorization": f"Bearer {self._api_key}", "Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=20) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            raise RuntimeError(f"Firecrawl search returned HTTP {exc.code}") from exc
+        except (urllib.error.URLError, TimeoutError) as exc:
+            raise RuntimeError(f"Firecrawl search failed: {exc}") from exc
+        if not payload.get("success", False):
+            raise RuntimeError(str(payload.get("error") or "Firecrawl search failed"))
+        data = payload.get("data") or {}
+        results = data.get("web", []) if isinstance(data, dict) else data   # v2 nests under "web"
+        return [
+            _web_document("firecrawl", item.get("title", ""), item.get("url", ""), item.get("description", ""))
+            for item in results[:limit]
+            if isinstance(item, dict) and item.get("url")
+        ]
+
+
+# One SerpApi markdown table row: | 1 | [Title](url) | Snippet | Source |
+_SERP_ROW_RE = re.compile(
+    r"^\|\s*\d+\s*\|\s*\[(?P<title>[^\]]*)\]\((?P<url>[^)\s]+)\)\s*\|(?P<snippet>.*)\|(?P<source>[^|]*)\|\s*$",
+    re.MULTILINE,
+)
+
+
+def search_serpapi(query: str, limit: int = 10, *, api_key: Optional[str] = None) -> list[dict]:
+    """Live Google search through SerpApi's markdown output.
+
+    Raises on a missing key, HTTP/quota error or timeout so the caller can fall
+    back to Firecrawl.
+    """
+    api_key = api_key or os.environ.get("SERPAPI_KEY", "")
+    if not api_key:
+        raise RuntimeError("SERPAPI_KEY is not set")
+    import serpapi
+
+    client = serpapi.Client(api_key=api_key, timeout=15)
+    results = client.search({"engine": "google", "q": query, "output": "md"})
+    if not isinstance(results, str):
+        # A JSON body here means SerpApi answered with an error (quota, bad key, ...).
+        raise RuntimeError(str(dict(results).get("error") or "SerpApi returned no markdown"))
+    if not results.strip():
+        raise RuntimeError("SerpApi returned an empty page")
+    documents = [
+        _web_document("serpapi", m["title"], m["url"], m["snippet"])
+        for m in _SERP_ROW_RE.finditer(results)
+    ]
+    if not documents:
+        # Unrecognized layout: keep the whole page as one piece of evidence.
+        search_url = "https://www.google.com/search?" + urllib.parse.urlencode({"q": query})
+        documents = [_web_document("serpapi", f"Google: {query}", search_url, results)]
+    return documents[:limit]
+
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
@@ -273,6 +336,17 @@ def normalize_document(source: ThreatSource, page: FetchedPage) -> dict:
     return document
 
 
+def _web_document(provider: str, title: str, url: str, snippet: str) -> dict:
+    """Normalize one live search hit into the same evidence schema as a crawl."""
+    source = ThreatSource(_clean_text(title, 120) or url, url, "web")
+    document = normalize_document(source, FetchedPage(content=f"{title}. {snippet}", metadata={}))
+    # A search snippet that says "malware" is not reputation evidence for the IOC
+    # that was searched; keep it out of policy's THREAT_INTEL_IOC rule.
+    document["ioc_reputation"] = ""
+    document["provider"] = provider
+    return document
+
+
 def _container_tags(document: dict) -> list[str]:
     tags = ["threat_feed", str(document.get("category") or "advisory")]
     if any((document.get("iocs") or {}).values()):
@@ -326,6 +400,7 @@ class ThreatIntelligenceService:
         else:
             firecrawl_key = os.environ.get("FIRECRAWL_API_KEY", "")
             self._crawler = FirecrawlProvider(firecrawl_key, self._cache_ttl) if firecrawl_key else None
+        self._serpapi_key = os.environ.get("SERPAPI_KEY", "").strip()
 
     @property
     def available(self) -> bool:
@@ -371,11 +446,20 @@ class ThreatIntelligenceService:
                 report["errors"].append(f"{source.name}: {str(exc)[:180]}")
         return report
 
-    def search(self, query: str, limit: int = 10) -> list[dict]:
-        """Search Supermemory first, accepting only our structured evidence schema."""
+    def search(self, query: str, limit: int = 10, *, live: bool = True) -> list[dict]:
+        """Live web search (SerpApi, then Firecrawl), else stored evidence.
+
+        Stored evidence is Supermemory first, then the local crawl cache, and
+        accepts only our structured evidence schema. Every result carries
+        `provider`: serpapi | firecrawl | cache.
+        """
         query = _clean_text(query, 300)
         if not query:
             return []
+        if live:
+            documents = self._live_search(query, limit)
+            if documents:
+                return _dedupe_documents(documents)[:limit]
         documents: list[dict] = []
         if self._client is not None and self._server_reachable():
             try:
@@ -399,14 +483,31 @@ class ThreatIntelligenceService:
             if len(documents) >= limit:
                 break
             documents.append(document)
-        return _dedupe_documents(documents)[:limit]
+        return [{**document, "provider": "cache"} for document in _dedupe_documents(documents)[:limit]]
 
-    def enrich(self, observable_type: str, value: str) -> dict:
+    def _live_search(self, query: str, limit: int) -> list[dict]:
+        """SerpApi first, Firecrawl search second; [] if neither is set up or both fail."""
+        if self._serpapi_key:
+            try:
+                documents = search_serpapi(query, limit, api_key=self._serpapi_key)
+                if documents:
+                    return documents
+            except Exception:
+                pass    # missing package, bad key, quota, timeout: fall through
+        firecrawl_search = getattr(self._crawler, "search", None)
+        if firecrawl_search is not None:
+            try:
+                return firecrawl_search(query, limit) or []
+            except Exception:
+                pass
+        return []
+
+    def enrich(self, observable_type: str, value: str, *, live: bool = True) -> dict:
         """Return the evidence needed to enrich a single IOC or package lookup."""
         value = _clean_text(value, 300)
         if not value:
             return _empty_enrichment(observable_type, value, self.available)
-        documents = self.search(value, limit=12)
+        documents = self.search(value, limit=12, live=live)
         direct = [doc for doc in documents if _document_mentions(doc, observable_type, value)]
         evidence = direct or documents
         return _build_enrichment(observable_type, value, evidence, self.available)
@@ -431,7 +532,9 @@ class ThreatIntelligenceService:
             ("package", packages or []),
         ):
             for value in _unique([str(value) for value in values], limit=20):
-                result = self.enrich(observable_type, value)
+                # Stored evidence only: this runs inside policy scoring for every
+                # connection, where a live search per IOC would cost latency and quota.
+                result = self.enrich(observable_type, value, live=False)
                 if result["previous_evidence"]:
                     matches[f"{observable_type}:{value}"] = result
 
@@ -462,7 +565,7 @@ class ThreatIntelligenceService:
         }
 
     def recent_cves(self, limit: int = 20) -> list[dict]:
-        documents = self.search("recent CVE security advisory", limit=max(limit * 2, 20))
+        documents = self.search("recent CVE security advisory", limit=max(limit * 2, 20), live=False)
         cves = [document for document in documents if document.get("cves")]
         return sorted(cves, key=lambda item: item.get("publication_date", ""), reverse=True)[:limit]
 
@@ -618,6 +721,7 @@ def _evidence_view(document: dict) -> dict:
         "publication_date": document.get("publication_date", ""),
         "source": {"name": source.get("name", ""), "url": source.get("url", "")},
         "summary": document.get("summary", ""),
+        "provider": document.get("provider", "cache"),
     }
 
 
