@@ -1,7 +1,5 @@
 clawforge - dev/distilbert/openai
 
-add dream rsi skill
-
 
 
 Things you can add:
