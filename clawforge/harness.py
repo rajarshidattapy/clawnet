@@ -105,10 +105,32 @@ Rules:
   and what you recommend next."""
 
 
+def load_skill() -> str:
+    """The repo's .clawforge/dream-rsi/SKILL.md as an instructions section ('' if absent), frontmatter
+    stripped but its name and activation description kept so the agent knows when it applies."""
+    path = os.path.join(os.path.dirname(clawforge.CORE_DIR), ".clawforge", "dream-rsi", "SKILL.md")
+    try:
+        with open(path, encoding="utf-8") as f:
+            text = f.read()
+    except OSError:
+        return ""
+    meta: dict[str, str] = {}
+    if text.startswith("---"):
+        _, front, text = text.split("---", 2)
+        for line in front.strip().splitlines():
+            k, _, v = line.partition(":")
+            meta[k.strip()] = v.strip()
+    header = f"\n\nSkill: {meta.get('name', 'skill')}"
+    if meta.get("description"):
+        header += f"\nApply this skill when: {meta['description']}"
+    header += "\nThe tool rules, approval gates and verdict authority above always take precedence.\n\n"
+    return header + text.strip()
+
+
 def manifest() -> dict:
     return {
         "model": {"name": f"openai/{_resource_name(agent_model_id())}"},
-        "instructions": INSTRUCTIONS,
+        "instructions": INSTRUCTIONS + load_skill(),
         "mcp_servers": [{
             "name": MCP_NAME,
             "enable_tools": ["@all"],
