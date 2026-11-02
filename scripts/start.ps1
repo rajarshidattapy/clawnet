@@ -33,7 +33,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$Root = $PSScriptRoot
+$Root = Split-Path -Parent $PSScriptRoot
 Set-Location $Root
 
 function Info($msg) { Write-Host "  $msg" -ForegroundColor DarkGray }
