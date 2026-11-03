@@ -17,12 +17,14 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
 import clawforge  # noqa: F401  (puts core/ on sys.path)
 import guardrails
 import llm
+import telemetry
 from clawforge.mcp_server import CONTROL_TOOLS, EXECUTE_TOOLS, token as mcp_token, url as mcp_url
 
 from rich.console import Console
@@ -405,6 +407,27 @@ def _announce_calls(events: dict, announced: set, hs: HarnessState, printed_main
     return printed_main
 
 
+def _record_generations(timeline: list) -> None:
+    """One generation span per model message the agent produced, with the tokens TrueForge reports.
+
+    `timeline` is [(arrival time, event)]. A message is taken to run from when it first arrived
+    to when the next event did, so the latency is approximate (it includes the stream)."""
+    for i, (started, ev) in enumerate(timeline):
+        if getattr(ev, "type", "") != "model.message":
+            continue
+        ended = timeline[i + 1][0] if i + 1 < len(timeline) else time.time()
+        usage = getattr(ev, "usage", None)
+        ref = str(getattr(ev, "model", "") or "")
+        provider, _, model = ref.partition("/")
+        telemetry.record("agent.llm", "generation", started, ended, provider=provider if model else "",
+                         model=model or ref or "unknown",
+                         input_tokens=getattr(usage, "input_tokens", 0) or 0,
+                         output_tokens=getattr(usage, "output_tokens", 0) or 0,
+                         output=_content_text(getattr(ev, "content", None)),
+                         attrs={"thread": getattr(ev, "thread_id", None), "source": "agent",
+                                "tool_calls": len(getattr(ev, "tool_calls", None) or [])})
+
+
 def _stream(c, session_id: str, turn_input: list, hs: HarnessState) -> tuple[list, list, Any]:
     """Stream one turn. Returns (pending approvals, pending questions, final state)."""
     from trueforge_sdk.events import is_event_delta, merge_event_delta
@@ -415,6 +438,8 @@ def _stream(c, session_id: str, turn_input: list, hs: HarnessState) -> tuple[lis
     printed_main = False
     announced: set = set()
     redactor = guardrails.StreamRedactor()     # secrets/PII never reach the screen
+    timeline: list = []                        # (arrival time, event), for the generation spans
+    call_info: dict = {}                       # tool call id -> (name, time the agent asked)
     stream = c.sessions.create_turn_stream(session_id=session_id, input=turn_input)
     for event in stream:
         if is_event_delta(event):
@@ -426,16 +451,26 @@ def _stream(c, session_id: str, turn_input: list, hs: HarnessState) -> tuple[lis
                 printed_main = True
             continue
         events[event.id] = event
+        timeline.append((time.time(), event))
         et = event.type
         # Tool calls stream in as deltas, so a model.message is only complete once
         # the next non-delta event arrives: announce its calls now.
         printed_main = _announce_calls(events, announced, hs, printed_main)
+        for known in events.values():
+            if getattr(known, "type", "") == "model.message":
+                for tc in (known.tool_calls or []):
+                    if tc.id not in call_info and tc.function.name:
+                        call_info[tc.id] = (getattr(tc.tool_info, "name", None) or tc.function.name, time.time())
         if et == "thread.created":
             console.print(f"\n[magenta]↳ subagent[/magenta] {getattr(event, 'title', '')}")
         elif et == "model.message" and event.thread_id == "main" and printed_main:
             console.print(redactor.flush() + "\n", markup=False, highlight=False)
             printed_main = False
         elif et == "tool.response":
+            asked = call_info.get(getattr(event, "tool_call_id", None))
+            if asked:       # the agent's view of the call, network included (the server records its own tool span)
+                telemetry.record(f"call.{asked[0]}", "toolcall", asked[1], time.time(),
+                                 output=_content_text(getattr(event, "content", None)))
             if hs.state in ("OBSERVING", "EXECUTING", "APPROVED", "STOP"):
                 hs.to("ANALYZING")
         elif et == "tool.approval_required":
@@ -454,8 +489,14 @@ def _stream(c, session_id: str, turn_input: list, hs: HarnessState) -> tuple[lis
             console.print("[red]TrueForge says the clawnet connector needs auth — re-run setup.[/red]")
         elif et == "turn.done":
             final = event.state
+            m = getattr(final, "metrics", None)
+            if telemetry.current() is not None:
+                telemetry.current().event("turn.done", status=getattr(final, "status", "?"),
+                                          tokens=getattr(m, "total_tokens", None),
+                                          cost_usd=getattr(m, "total_cost_in_usd", None))
     if printed_main:
         console.print(redactor.flush(), markup=False, highlight=False)
+    _record_generations(timeline)
     return approvals, questions, final
 
 
@@ -464,13 +505,23 @@ def run(task: str, session_id: Optional[str] = None, *, decide=None, reply=None,
     """Run one task to completion, pausing at every approval checkpoint.
 
     decide / reply: optional callbacks for approvals and agent questions (default:
-    terminal prompts). hs: pass a HarnessState to observe it from another thread."""
+    terminal prompts). hs: pass a HarnessState to observe it from another thread.
+
+    The whole task is one trace: model messages, tool calls and human approvals are its spans."""
+    with telemetry.span("agent.run", "agent", new_trace=True, session=session_id) as root:
+        root.set_io(input=task)
+        return _run(task, session_id, decide, reply, hs)
+
+
+def _run(task: str, session_id: Optional[str], decide, reply, hs: Optional[HarnessState]) -> str:
     import policy
     load_env()
     c = client()
     if session_id is None:
         session_id = c.sessions.create(agent={"name": AGENT_NAME}).data.id
         policy.log_decision("harness_session", session_id=session_id, task=policy.scrub(task, 300))
+    if telemetry.current() is not None:
+        telemetry.current().session = session_id
     console.print(Panel(task, title=f"[bold bright_cyan]ClawForge[/bold bright_cyan]  session {session_id}",
                         border_style="bright_cyan"))
     hs = hs if hs is not None else HarnessState()
@@ -483,6 +534,8 @@ def run(task: str, session_id: Optional[str] = None, *, decide=None, reply=None,
         approvals, questions, final = _stream(c, session_id, turn_input, hs)
         if final is not None and final.status == "error":
             console.print(f"[red]turn error:[/red] {getattr(final, 'message', '')}")
+            if telemetry.current() is not None:
+                telemetry.current().set_status("error", str(getattr(final, "message", "turn error")))
             break
         if not approvals and not questions:
             break
@@ -494,7 +547,11 @@ def run(task: str, session_id: Optional[str] = None, *, decide=None, reply=None,
             except json.JSONDecodeError:
                 args = {"raw": call.function.arguments}
             hs.to("APPROVAL", name)
+            asked_at = time.time()
             ok, why = ask_human(name, args, decide)
+            # How long a human took to decide is part of the latency story, so it is a span of its own.
+            telemetry.record(f"approval.{name}", "human", asked_at, time.time(),
+                             status="ok" if ok else "refused", attrs={"tool": name, "approved": ok})
             hs.to("APPROVED" if ok else "REJECTED", name)
             if not ok:
                 hs.to("STOP", "agent told not to retry")

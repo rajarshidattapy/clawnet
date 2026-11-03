@@ -151,3 +151,16 @@ def test_direct_log_entries_carry_the_caller_only_inside_a_request(log):
         policy.reset_caller(token)
     policy.log_decision("probe")
     assert ["caller" in e for e in _entries(log)] == [False, True, False]
+
+
+def test_tool_calls_are_traced_with_the_caller(client, log):
+    import telemetry
+    token = _jwt("tracy", ["viewer"])
+    _call(client, token, "recent_decisions", limit=1)
+    _call(client, token, "kill_process", pid=4242, reason=REASON)
+    mine = [r for r in telemetry.load() if r["type"] == "span" and (r.get("user") or {}).get("sub") == "tracy"]
+    by = {r["name"]: r for r in mine}
+    assert by["tool.recent_decisions"]["status"] == "ok" and by["tool.recent_decisions"]["attrs"]["tier"] == "observe"
+    assert by["tool.kill_process"]["status"] == "refused" and by["tool.kill_process"]["error"] == "rbac"
+    assert by["tool.kill_process"]["user"] == {"sub": "tracy", "role": "viewer", "auth": "jwt"}
+    assert all(r["kind"] == "tool" and r["ms"] >= 0 for r in mine)

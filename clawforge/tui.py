@@ -43,6 +43,7 @@ HELP = """\
   /watch    live connections + agent + prompt on one screen (Esc to return)
   /news     fetch live security news and store it in Supermemory · /news <query> searches the web
   /status   re-run the preflight checks      /tools   tools and their approval tier
+  /settings monitoring dashboard (tokens, cost, latency, traces) and settings · /settings help
   /setup    register provider, connector, agent in TrueForge
   /new      start a fresh session            /quit    exit"""
 
@@ -305,6 +306,8 @@ def main() -> None:
                                 else "[dim]searching stored news…[/dim]"):
                 panel = news(msg[5:].strip())
             console.print(panel)
+        elif cmd == "/settings" or cmd.startswith("/settings "):
+            _settings(msg[9:].strip())
         elif cmd == "/setup":
             _setup()
         elif cmd == "/new":
@@ -329,12 +332,31 @@ def main() -> None:
 
 def _offer_setup(checks: list[Check]) -> bool:
     by = {c.name: c for c in checks}
-    if (by["OpenAI key"].ok and by["TrueForge"].ok and by["ClawNet MCP server"].ok
+    llm_ok = next((c.ok for n, c in by.items() if n.startswith("LLM")), False)
+    if (llm_ok and by["TrueForge"].ok and by["ClawNet MCP server"].ok
             and not by["Agent registered"].ok):
         if Confirm.ask("TrueForge is up but the ClawForge agent isn't registered. Run setup now?",
                        default=True):
             return _setup()
     return False
+
+
+def _settings(arg: str) -> None:
+    """/settings: the monitoring dashboard and the switches (clawforge/monitor.py)."""
+    import telemetry
+    from clawforge import monitor
+    cmd = arg.split()[0].lower() if arg else ""
+    if cmd == "live":
+        monitor.live(console, next((w for w in arg.split()[1:] if w in monitor.PERIODS), monitor.DEFAULT_PERIOD))
+    elif cmd == "clear":
+        if Confirm.ask("Delete the trace log (all recorded traces, tokens and costs)?", default=False):
+            console.print(f"[dim]deleted {telemetry.clear()} records[/dim]")
+    elif cmd == "help":
+        console.print(Panel(Text(monitor.HELP), title="/settings", border_style="bright_black", padding=(0, 1)))
+    else:
+        with console.status("[dim]reading traces…[/dim]"):
+            view = monitor.settings(arg)
+        console.print(view)
 
 
 def _setup() -> bool:

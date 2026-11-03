@@ -34,6 +34,7 @@ from clawforge import capabilities as cap
 from clawforge import rbac
 
 import policy
+import telemetry
 
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
@@ -121,17 +122,27 @@ def tool(*, title: str, annotations: ToolAnnotations):
             principal = _principal()
             caller = ({"sub": principal.get("sub"), "role": principal.get("role"),
                        "auth": principal.get("auth")} if principal else None)
-            if caller is None or not rbac.allowed(caller["role"], tier):
-                detail = (f"role '{caller['role']}' may not call {tier} tools ({fn.__name__})"
-                          if caller else "no authenticated caller")
-                policy.log_decision("rbac_denied", tool=fn.__name__, tier=tier, detail=detail,
-                                    caller=caller or {"sub": None, "role": None, "auth": None})
-                return {"ok": False, "refused": "rbac", "tool": fn.__name__, "detail": detail}
-            token = policy.set_caller(caller)
-            try:
-                return fn(*args, **kwargs)
-            finally:
-                policy.reset_caller(token)
+            # One span per tool call: latency, caller, and whether it ran, was refused or failed.
+            with telemetry.span(f"tool.{fn.__name__}", "tool", new_trace=True, user=caller, tier=tier) as sp:
+                sp.set_io(input=kwargs or list(args))
+                if caller is None or not rbac.allowed(caller["role"], tier):
+                    detail = (f"role '{caller['role']}' may not call {tier} tools ({fn.__name__})"
+                              if caller else "no authenticated caller")
+                    policy.log_decision("rbac_denied", tool=fn.__name__, tier=tier, detail=detail,
+                                        caller=caller or {"sub": None, "role": None, "auth": None})
+                    sp.set_status("refused", "rbac")
+                    return {"ok": False, "refused": "rbac", "tool": fn.__name__, "detail": detail}
+                token = policy.set_caller(caller)
+                try:
+                    result = fn(*args, **kwargs)
+                finally:
+                    policy.reset_caller(token)
+                if isinstance(result, dict):
+                    sp.set(result_ok=result.get("ok"))
+                    if result.get("refused"):
+                        sp.set_status("refused", str(result["refused"]))
+                sp.set_io(output=result)
+                return result
 
         return mcp.tool(title=title, annotations=annotations)(guarded)
 

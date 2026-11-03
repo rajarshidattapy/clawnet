@@ -41,9 +41,10 @@ from typing import Callable, Optional
 try:
     import llm
     import policy
+    import telemetry
     from clawnet_agent import _SYSTEM_EXPLAIN
 except ImportError:
-    from core import llm, policy  # type: ignore
+    from core import llm, policy, telemetry  # type: ignore
     from core.clawnet_agent import _SYSTEM_EXPLAIN  # type: ignore
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -206,9 +207,16 @@ def run_live(cases: list[dict], gen: Callable = generate, jdg: Callable = judge)
     results, takes = [], {}
     for case in cases:
         _, verdict, payload = build(case)
-        explanation = gen(payload)
-        scores, reason = jdg(case, payload, explanation)
-        results.append(grade(case, verdict.level, explanation, scores, reason))
+        # One trace per case: the generator and judge calls nest under it, and the judge's scores
+        # are attached to it, so quality sits next to the tokens, cost and latency of the same run.
+        with telemetry.span(f"eval.{case['id']}", "eval", new_trace=True, tags=["quality-eval"]):
+            explanation = gen(payload)
+            scores, reason = jdg(case, payload, explanation)
+            result = grade(case, verdict.level, explanation, scores, reason)
+            for dim, value in scores.items():
+                telemetry.score(dim, value, comment=reason)
+            telemetry.score("passed", 1.0 if result.passed else 0.0)
+        results.append(result)
         takes[case["id"]] = {"fingerprint": fingerprint(case, payload), "explanation": explanation,
                              "scores": scores, "reason": reason}
     return results, takes

@@ -24,13 +24,16 @@ on OpenRouter. With OLLAMA=yes nothing leaves the machine.
 
 Everything the model returns passes through guardrails.redact (secrets and PII).
 Answers are cached on disk by prompt hash (llm_cache.py; LLM_CACHE=no turns it off).
+Every call is traced with tokens, cost and latency (telemetry.py).
 
 Plain HTTP via `requests` — no vendor SDKs needed.
 """
 from __future__ import annotations
 
+import hashlib
 import os
 import re
+import time
 from dataclasses import dataclass, replace
 from typing import Optional
 
@@ -38,10 +41,11 @@ import requests
 
 try:
     import llm_cache
-    from guardrails import redact
+    import telemetry
+    from guardrails import redact_report
 except ImportError:
-    from core import llm_cache  # type: ignore
-    from core.guardrails import redact  # type: ignore
+    from core import llm_cache, telemetry  # type: ignore
+    from core.guardrails import redact_report  # type: ignore
 
 PROVIDERS = ("openai", "anthropic", "gemini", "openrouter")
 
@@ -140,8 +144,19 @@ def _is_reasoning_model(name: str) -> bool:
     return name.lower().rsplit("/", 1)[-1].startswith(("gpt-5", "o1", "o3", "o4"))
 
 
+def _usage(data: dict) -> dict:
+    """Token counts, and the provider's own cost when it sends one (OpenRouter does), from a response."""
+    u = data.get("usage") or {}
+    count = lambda v: v if isinstance(v, int) and not isinstance(v, bool) else None      # noqa: E731
+    cost = u.get("cost")
+    return {"input": count(u.get("prompt_tokens", u.get("input_tokens"))),
+            "output": count(u.get("completion_tokens", u.get("output_tokens"))),
+            "cost": float(cost) if isinstance(cost, (int, float)) and not isinstance(cost, bool) else None}
+
+
 def _complete(p: Provider, system: str, user: str, max_tokens: int,
-              temperature: float, timeout: int) -> str:
+              temperature: float, timeout: int) -> tuple[str, dict]:
+    """(answer, usage) from one provider call."""
     if p.name == "anthropic":
         resp = requests.post(
             p.base_url + "/messages", timeout=timeout,
@@ -149,9 +164,10 @@ def _complete(p: Provider, system: str, user: str, max_tokens: int,
             json={"model": p.model, "max_tokens": max_tokens, "temperature": temperature,
                   "system": system, "messages": [{"role": "user", "content": user}]})
         resp.raise_for_status()
-        blocks = resp.json().get("content") or []
+        data = resp.json()
+        blocks = data.get("content") or []
         text = "".join(b.get("text", "") for b in blocks if b.get("type") == "text")
-        return _THINK.sub("", text).strip()
+        return _THINK.sub("", text).strip(), _usage(data)
 
     payload = {"model": p.model,
                "messages": [{"role": "system", "content": system},
@@ -168,9 +184,10 @@ def _complete(p: Provider, system: str, user: str, max_tokens: int,
     resp = requests.post(p.base_url + "/chat/completions", json=payload, headers=headers,
                          timeout=timeout)
     resp.raise_for_status()
-    choices = resp.json().get("choices") or [{}]
+    data = resp.json()
+    choices = data.get("choices") or [{}]
     text = ((choices[0].get("message") or {}).get("content")) or ""
-    return _THINK.sub("", text).strip()
+    return _THINK.sub("", text).strip(), _usage(data)
 
 
 def chat(system: str, user: str, *, max_tokens: int = 200,
@@ -184,34 +201,72 @@ def chat(system: str, user: str, *, max_tokens: int = 200,
     the deterministic verdict it narrates. Tries the chosen provider first; if its key is
     missing or the call fails, retries on OpenRouter when that is configured (never in
     OLLAMA mode). Raises when nothing worked so callers can fall back to the rule summary.
+
+    Every call is a "generation" span (core/telemetry.py): model, tokens, cost, latency,
+    cache hit, and each provider attempt.
     """
     # Only deterministic calls are cached: at temperature 0 the same prompt means the same answer.
     primary = replace(resolve(), model=model) if model else resolve()
     cacheable = llm_cache.enabled() and temperature == 0
-    if cacheable:
-        k = llm_cache.key(primary.name, primary.model, system, user, max_tokens, temperature)
-        if (hit := llm_cache.get(k)) is not None:
-            return hit
-    text = redact(_chat(primary, system, user, max_tokens, temperature, timeout))
-    if cacheable:
-        llm_cache.put(k, text)      # the redacted answer, never the raw one
-    return text
+    with telemetry.span("llm.chat", "generation", provider=primary.name, model=primary.model,
+                        max_tokens=max_tokens,
+                        prompt_hash=hashlib.sha256(system.encode("utf-8")).hexdigest()[:12]) as sp:
+        sp.set_io(input=user)
+        if cacheable:
+            k = llm_cache.key(primary.name, primary.model, system, user, max_tokens, temperature)
+            if (hit := llm_cache.get(k)) is not None:
+                sp.set(cached=True).set_io(output=hit)
+                sp.set_generation(provider=primary.name, model=primary.model, reported_cost=0.0)
+                return hit
+        attempts: list[dict] = []
+        try:
+            raw, used, usage = _chat(primary, system, user, max_tokens, temperature, timeout, attempts)
+        finally:
+            sp.set(attempts=attempts)
+        estimated = usage["input"] is None or usage["output"] is None
+        sp.set_generation(
+            provider=used.name, model=used.model, estimated=estimated, reported_cost=usage["cost"],
+            input_tokens=telemetry.estimate_tokens(system + user) if usage["input"] is None else usage["input"],
+            output_tokens=telemetry.estimate_tokens(raw) if usage["output"] is None else usage["output"])
+        text, found = redact_report(raw)
+        sp.set(fallback=used.name != primary.name, redactions=len(found)).set_io(output=text)
+        if cacheable:
+            llm_cache.put(k, text)      # the redacted answer, never the raw one
+        return text
+
+
+def _attempt(p: Provider, attempts: list, system: str, user: str, max_tokens: int,
+             temperature: float, timeout: int) -> tuple[str, dict]:
+    """One provider call, noting its outcome and latency in `attempts`."""
+    started = time.time()
+    note = {"provider": p.name, "model": p.model}
+    attempts.append(note)
+    try:
+        out = _complete(p, system, user, max_tokens, temperature, timeout)
+        note.update(ok=True, ms=round((time.time() - started) * 1000, 1))
+        return out
+    except (requests.RequestException, ValueError) as exc:
+        note.update(ok=False, ms=round((time.time() - started) * 1000, 1), error=f"{type(exc).__name__}: {exc}"[:160])
+        raise
 
 
 def _chat(primary: Provider, system: str, user: str, max_tokens: int, temperature: float,
-          timeout: int) -> str:
+          timeout: int, attempts: list) -> tuple[str, Provider, dict]:
+    """(answer, the provider that answered, its usage); raises when no provider could."""
     backup = fallback()
     if not primary.local and not primary.api_key and backup is None:
         raise RuntimeError(f"no API key for LLM_PROVIDER={primary.name} (set LLM_API_KEY)")
     error: Optional[Exception] = None
     if primary.local or primary.api_key:
         try:
-            return _complete(primary, system, user, max_tokens, temperature, timeout)
+            text, usage = _attempt(primary, attempts, system, user, max_tokens, temperature, timeout)
+            return text, primary, usage
         except (requests.RequestException, ValueError) as exc:
             if backup is None:
                 raise
             error = exc
     try:
-        return _complete(backup, system, user, max_tokens, temperature, timeout)
+        text, usage = _attempt(backup, attempts, system, user, max_tokens, temperature, timeout)
+        return text, backup, usage
     except (requests.RequestException, ValueError) as exc:
         raise exc from error
