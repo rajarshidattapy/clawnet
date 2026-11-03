@@ -2,6 +2,8 @@
 
 ### AI security harness for your machine.
 
+![ClawForge Banner](docs/banner.png)
+
 ClawForge is a local terminal application for observing network activity, investigating suspicious processes, sandboxing code, and taking guarded security actions. It has no TrueForge dependency and does not require Node.js or a hosted orchestration service.
 
 It includes a native copilot, local human approvals, provider-agnostic model routing, telemetry, offline evaluation gates, and an optional localhost MCP server for compatible clients.
