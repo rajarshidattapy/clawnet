@@ -150,7 +150,7 @@ An unknown action name is also rejected.
 - **No content-safety classifier** (toxicity, harmful-content filters). The agent's domain is narrow and its outputs are security findings, so this was not the priority.
 - **No rate limits** on control actions.
 - **Redaction is not applied to tool output going into the model.** That is machine evidence and is already scrubbed for injection. Only model-written text is redacted.
-- **No role-based limits.** Every caller of the MCP server can reach every tool. Per-user permissions would be a separate layer (see the RBAC item in `docs/todo.md`).
+- **Roles are coarse.** RBAC (`clawforge/rbac.py`) gates the three tiers (observe, sandbox, control) by role. It does not restrict *which* process or IP a role may act on; that stays with the policy layer. The static service token is a `responder` by default, so the TrueForge agent can reach the control tools (each one still waits for a human).
 - **Output redaction is regex-based** (see 2.4).
 
 ### Quick map

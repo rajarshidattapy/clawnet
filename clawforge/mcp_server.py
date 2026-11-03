@@ -15,9 +15,14 @@ can refuse (protected processes, private IPs, System32, failed chain of trust).
 Every request needs a bearer credential: the static service token the registered TrueForge
 connector sends, or an OAuth/JWT access token when JWT auth is configured (JwtVerifier).
 Nothing else can reach the CONTROL tools.
+
+RBAC (clawforge/rbac.py): the caller's role decides which tier it may call: viewer = OBSERVE,
+analyst = OBSERVE + EXECUTE, responder = all three. Every decision-log entry made while serving
+a request records the caller.
 """
 from __future__ import annotations
 
+import functools
 import hmac
 import os
 import secrets
@@ -26,6 +31,9 @@ from typing import Optional
 
 import clawforge  # noqa: F401  (puts core/ on sys.path)
 from clawforge import capabilities as cap
+from clawforge import rbac
+
+import policy
 
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
@@ -88,14 +96,56 @@ mcp = FastMCP(
 
 # ── OBSERVE ───────────────────────────────────────────────────────────────────
 
-@mcp.tool(title="System status", annotations=OBSERVE)
+TOOL_TIERS: dict[str, str] = {}      # tool name -> tier, filled in as tools are registered
+
+
+def _principal() -> Optional[dict]:
+    """The authenticated caller of the request being served (set by TokenAuth)."""
+    try:
+        scope = mcp.get_context().request_context.request.scope
+    except Exception:       # no request in flight (called directly, or a transport without HTTP)
+        return None
+    return scope.get("clawforge.principal")
+
+
+def tool(*, title: str, annotations: ToolAnnotations):
+    """`@mcp.tool` plus the RBAC check. The tier comes from the annotations, the same hints the
+    approval gate reads, so a tool cannot be in one tier for approval and another for access."""
+    tier = rbac.tier_of(annotations)
+
+    def register(fn):
+        TOOL_TIERS[fn.__name__] = tier
+
+        @functools.wraps(fn)
+        def guarded(*args, **kwargs):
+            principal = _principal()
+            caller = ({"sub": principal.get("sub"), "role": principal.get("role"),
+                       "auth": principal.get("auth")} if principal else None)
+            if caller is None or not rbac.allowed(caller["role"], tier):
+                detail = (f"role '{caller['role']}' may not call {tier} tools ({fn.__name__})"
+                          if caller else "no authenticated caller")
+                policy.log_decision("rbac_denied", tool=fn.__name__, tier=tier, detail=detail,
+                                    caller=caller or {"sub": None, "role": None, "auth": None})
+                return {"ok": False, "refused": "rbac", "tool": fn.__name__, "detail": detail}
+            token = policy.set_caller(caller)
+            try:
+                return fn(*args, **kwargs)
+            finally:
+                policy.reset_caller(token)
+
+        return mcp.tool(title=title, annotations=annotations)(guarded)
+
+    return register
+
+
+@tool(title="System status", annotations=OBSERVE)
 def system_status() -> dict:
     """Host overview: IPs, VPN, gateway, DNS, admin rights, which sandbox (Daytona / Docker)
     and AI explanations are available, and how many connections are active."""
     return cap.system_status()
 
 
-@mcp.tool(title="List connections", annotations=OBSERVE)
+@tool(title="List connections", annotations=OBSERVE)
 def list_connections(scope: str = "flagged", limit: int = 40) -> dict:
     """Live TCP/UDP connections, each with the policy engine's deterministic verdict
     (SAFE/SUSPICIOUS/CRITICAL), score and triggered rules. scope: flagged | foreign |
@@ -103,55 +153,55 @@ def list_connections(scope: str = "flagged", limit: int = 40) -> dict:
     return cap.list_connections(scope=scope, limit=limit)
 
 
-@mcp.tool(title="Suspicious processes", annotations=OBSERVE)
+@tool(title="Suspicious processes", annotations=OBSERVE)
 def suspicious_processes(limit: int = 25) -> dict:
     """Which running processes look suspicious right now: ranked by their worst
     connection verdict, plus binaries running from drop zones (Temp, Downloads, …)."""
     return cap.suspicious_processes(limit=limit)
 
 
-@mcp.tool(title="Inspect process", annotations=OBSERVE)
+@tool(title="Inspect process", annotations=OBSERVE)
 def inspect_process(pid: int) -> dict:
     """Deep look at one process: exe path, SHA-256, command line, user, parent chain,
     drop-zone/trusted/protected flags, its connections, and forensic history."""
     return cap.inspect_process(pid)
 
 
-@mcp.tool(title="Who is listening", annotations=OBSERVE)
+@tool(title="Who is listening", annotations=OBSERVE)
 def who_is_listening(port: int) -> dict:
     """Which process is listening on a local port, with its verdict."""
     return cap.who_is_listening(port)
 
 
-@mcp.tool(title="Explain verdict", annotations=OBSERVE)
+@tool(title="Explain verdict", annotations=OBSERVE)
 def explain_pid(pid: int) -> dict:
     """The full evidence trail behind the policy engine's verdicts for a PID: every
     rule that fired, its points, and the evidence it fired on."""
     return cap.explain_pid(pid)
 
 
-@mcp.tool(title="Evidence memory", annotations=OBSERVE)
+@tool(title="Evidence memory", annotations=OBSERVE)
 def lookup_evidence(sha256: str = "", ip: str = "", process: str = "") -> dict:
     """Search ClawNet's append-only forensic memory for prior sightings of a hash,
     IP or process name (seen count, worst prior verdict, first/last seen)."""
     return cap.lookup_evidence(sha256=sha256, ip=ip, process=process)
 
 
-@mcp.tool(title="Threat intelligence", annotations=OBSERVE)
+@tool(title="Threat intelligence", annotations=OBSERVE)
 def threat_intel(kind: str, value: str) -> dict:
     """Look up an observable in the threat-intel store (CISA KEV, NVD, advisories).
     kind: ip | domain | hash | url | package."""
     return cap.threat_intel(kind, value)
 
 
-@mcp.tool(title="Decision log", annotations=OBSERVE)
+@tool(title="Decision log", annotations=OBSERVE)
 def recent_decisions(limit: int = 20) -> dict:
     """Recent entries from ClawNet's immutable decision log: verdicts, refusals,
     approvals and executed actions."""
     return cap.recent_decisions(limit=limit)
 
 
-@mcp.tool(title="Preview action", annotations=OBSERVE)
+@tool(title="Preview action", annotations=OBSERVE)
 def preview_action(action: str, pid: int = 0, ip: str = "", path: str = "",
                    port: int = 0, run_id: str = "") -> dict:
     """Measure a control action BEFORE proposing it: guardrail result, target
@@ -161,20 +211,20 @@ def preview_action(action: str, pid: int = 0, ip: str = "", path: str = "",
     return cap.preview_action(action, pid=pid, ip=ip, path=path, port=port, run_id=run_id)
 
 
-@mcp.tool(title="Sandbox runs", annotations=OBSERVE)
+@tool(title="Sandbox runs", annotations=OBSERVE)
 def list_sandbox_runs(limit: int = 10) -> dict:
     """Recent sandbox runs with their verdicts."""
     return cap.list_sandbox_runs(limit=limit)
 
 
-@mcp.tool(title="Sandbox report", annotations=OBSERVE)
+@tool(title="Sandbox report", annotations=OBSERVE)
 def sandbox_report(run_id: str) -> dict:
     """Behavioral report and chain-of-trust status for a past sandbox run."""
     return cap.sandbox_report(run_id)
 
 # ── EXECUTE (Daytona sandbox, Docker fallback) ──────────────────────────────────────────────────
 
-@mcp.tool(title="Run code in sandbox", annotations=EXECUTE)
+@tool(title="Run code in sandbox", annotations=EXECUTE)
 def sandbox_run_code(code: str, language: str = "python", command: str = "",
                      network: bool = False, extra_files: Optional[dict[str, str]] = None) -> dict:
     """Run code you wrote inside ClawNet's sandbox: an ephemeral Daytona sandbox (Docker
@@ -185,14 +235,14 @@ def sandbox_run_code(code: str, language: str = "python", command: str = "",
                                 network=network, extra_files=extra_files)
 
 
-@mcp.tool(title="Sandbox a local project", annotations=EXECUTE)
+@tool(title="Sandbox a local project", annotations=EXECUTE)
 def sandbox_run_path(path: str, command: str = "", network: bool = True) -> dict:
     """Copy a local project into quarantine and run it in the sandbox with behavioral
     telemetry. Your working tree is never mounted."""
     return cap.sandbox_run_path(path, command=command, network=network)
 
 
-@mcp.tool(title="Sandbox a git repo", annotations=EXECUTE)
+@tool(title="Sandbox a git repo", annotations=EXECUTE)
 def sandbox_clone(git_url: str, command: str = "", network: bool = True) -> dict:
     """Clone a git repository (URL ending in .git) straight into the sandbox and
     report what it actually did when run."""
@@ -200,41 +250,41 @@ def sandbox_clone(git_url: str, command: str = "", network: bool = True) -> dict
 
 # ── CONTROL (human approval required) ─────────────────────────────────────────
 
-@mcp.tool(title="Kill process", annotations=CONTROL)
+@tool(title="Kill process", annotations=CONTROL)
 def kill_process(pid: int, reason: str) -> dict:
     """Terminate a process. IRREVERSIBLE. Requires human approval. Refused for
     protected system processes. `reason` must state the evidence and consequence."""
     return cap.kill_process(pid, reason)
 
 
-@mcp.tool(title="Suspend process", annotations=CONTROL)
+@tool(title="Suspend process", annotations=CONTROL)
 def suspend_process(pid: int, reason: str) -> dict:
     """Freeze a process (can be resumed later). Requires human approval."""
     return cap.suspend_process(pid, reason)
 
 
-@mcp.tool(title="Block IP", annotations=CONTROL)
+@tool(title="Block IP", annotations=CONTROL)
 def block_ip(ip: str, reason: str) -> dict:
     """Add an outbound Windows Firewall block rule for a public IP. Requires human
     approval. Refused for private/local IPs."""
     return cap.block_ip(ip, reason)
 
 
-@mcp.tool(title="Quarantine file", annotations=CONTROL)
+@tool(title="Quarantine file", annotations=CONTROL)
 def quarantine_file(path: str, reason: str) -> dict:
     """Move a file from a drop zone (Temp, Downloads, Desktop, …) to the Recycle Bin.
     Requires human approval. Refused for system files."""
     return cap.quarantine_file(path, reason)
 
 
-@mcp.tool(title="Close port", annotations=CONTROL)
+@tool(title="Close port", annotations=CONTROL)
 def close_port(port: int, reason: str) -> dict:
     """Kill every process bound to a local port. IRREVERSIBLE. Requires human
     approval; each kill is still guardrailed."""
     return cap.close_port(port, reason)
 
 
-@mcp.tool(title="Promote sandbox run", annotations=CONTROL)
+@tool(title="Promote sandbox run", annotations=CONTROL)
 def promote_sandbox_run(run_id: str, reason: str) -> dict:
     """Copy a vetted, quarantined sandbox snapshot to the host workspace. Requires
     human approval, and a failed blocking chain-of-trust step refuses it anyway."""
@@ -295,8 +345,9 @@ class TokenAuth:
 
     Accepts a verified OAuth/JWT access token (when a JwtVerifier is configured) or the
     static service token the registered TrueForge connector sends. Pass static_token=None
-    to require JWTs only. The caller's identity (JWT `sub`, or "service") is left in
-    scope["clawforge.principal"] for audit and role checks.
+    to require JWTs only. The caller's identity and role (JWT `sub` and its mapped role, or
+    "service" with CLAWFORGE_SERVICE_ROLE) are left in scope["clawforge.principal"], where the
+    tool wrapper reads them for the RBAC check and the audit log.
     """
 
     def __init__(self, app, static_token: Optional[str], verifier: Optional[JwtVerifier] = None) -> None:
@@ -306,11 +357,12 @@ class TokenAuth:
 
     def _principal(self, header: bytes) -> Optional[dict]:
         if self.static and hmac.compare_digest(header, self.static):
-            return {"sub": "service", "auth": "static-token"}
+            return {"sub": "service", "auth": "static-token", "role": rbac.service_role()}
         if self.verifier and header[:7].lower() == b"bearer ":
             claims = self.verifier.verify(header[7:].decode("ascii", "ignore").strip())
             if claims is not None:
-                return {"sub": claims.get("sub", "unknown"), "auth": "jwt", "claims": claims}
+                return {"sub": claims.get("sub", "unknown"), "auth": "jwt", "claims": claims,
+                        "role": rbac.role_from_claims(claims)}
         return None
 
     async def __call__(self, scope, receive, send):
@@ -362,6 +414,8 @@ def serve() -> None:
     print(f"Bearer token file     ->  {TOKEN_PATH if not os.environ.get('CLAWFORGE_TOKEN') else '$CLAWFORGE_TOKEN'}")
     if os.environ.get("CLAWFORGE_JWKS_URL") or os.environ.get("CLAWFORGE_JWT_KEY"):
         print(f"JWT auth              ->  enabled (issuer {os.environ.get('CLAWFORGE_JWT_ISSUER')})")
+    print(f"RBAC                  ->  service token = {rbac.service_role()}, "
+          f"JWT without a known role = {rbac.default_role()}")
     uvicorn.run(app(), host=host(), port=port(), log_level="warning")
 
 

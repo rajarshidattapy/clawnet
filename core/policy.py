@@ -12,6 +12,7 @@ Layers:
 """
 from __future__ import annotations
 
+import contextvars
 import hashlib
 import json
 import os
@@ -585,11 +586,26 @@ def _llm_threat_evidence(threat: dict) -> dict:
 
 _log_lock = threading.Lock()
 
+# Who is making the current request (set by the MCP server's RBAC layer): {"sub", "role", "auth"}.
+_CALLER: contextvars.ContextVar = contextvars.ContextVar("clawnet_caller", default=None)
+
+
+def set_caller(caller: Optional[dict]):
+    """Attribute decision-log entries made in this context to `caller`. Returns a reset token."""
+    return _CALLER.set(caller)
+
+
+def reset_caller(token) -> None:
+    _CALLER.reset(token)
+
 
 def log_decision(kind: str, **fields) -> None:
     """Append-only record of every verdict, approval and executed action."""
     entry = {"ts": datetime.now().isoformat(timespec="seconds"), "kind": kind}
     entry.update(fields)
+    caller = _CALLER.get()
+    if caller and "caller" not in entry:
+        entry["caller"] = caller
     try:
         with _log_lock:
             DECISION_LOG.parent.mkdir(parents=True, exist_ok=True)
