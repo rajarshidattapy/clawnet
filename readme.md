@@ -101,6 +101,66 @@ ClawForge is not a separate agent platform sitting beside ClawNet.
 
 TrueForge provides the agentic orchestration primitives, while ClawNet provides the machine-level capabilities and security boundaries.
 
+### Runtime, model routing, and safety boundaries
+
+```mermaid
+flowchart TB
+    User["Operator"] --> Console["ClawForge console / TrueForge web UI"]
+    Console --> TF["TrueForge\nagent sessions, subagents, tool orchestration"]
+
+    subgraph Host["Developer machine"]
+        direction TB
+        TF -->|"localhost MCP + bearer token"| MCP["ClawNet MCP server"]
+        MCP --> Tools["Annotated capabilities"]
+
+        Tools --> Observe["Observe\nconnections, processes, ports, evidence"]
+        Tools --> Execute["Execute\nsandbox_run_* only"]
+        Tools --> Control["Control\nkill, block, quarantine, close port"]
+
+        Observe --> Policy["Deterministic policy engine\nverdict + action"]
+        Execute --> Sandbox["Daytona ephemeral sandbox\nDocker fallback"]
+        Control --> Approval["TrueForge human approval"]
+        Approval --> Guardrails["Local guardrails\nprotected targets, blast radius, chain of trust"]
+        Guardrails --> Machine["Host machine action"]
+
+        Policy --> Explain["Short explanation"]
+        Sandbox --> Explain
+        Console --> Copilot["Security copilot / agent task"]
+
+        Explain -->|"route: fast"| Router["Provider-agnostic model router\nLLM_FAST_MODEL / LLM_REASONING_MODEL"]
+        Copilot -->|"route: reasoning"| Router
+        TF -->|"reasoning model at setup"| Router
+
+        Router --> Fast["Fast model\nshort, low-cost explanations"]
+        Router --> Reasoning["Reasoning model\ndeep investigation and planning"]
+        Fast --> LLM["Selected provider"]
+        Reasoning --> LLM
+
+        Telemetry["Telemetry + LLM cache\ntraces, tokens, latency, cost"] -.-> Router
+        Tools -.-> Telemetry
+        Policy -.-> Decisions["Append-only decision log"]
+    end
+
+    subgraph Providers["Model provider selected by LLM_PROVIDER"]
+        LLM --> OpenAI["OpenAI"]
+        LLM --> Anthropic["Anthropic"]
+        LLM --> Gemini["Gemini"]
+        LLM --> OpenRouter["OpenRouter"]
+        LLM --> Ollama["Local Ollama"]
+    end
+
+    Observe <-->|"read-only enrichment"| Intel["Threat intel / Supermemory"]
+
+    subgraph CI["CI: deterministic and offline gates"]
+        Replay["Safety replay"] --> Quality["Quality cassette replay"]
+        Quality --> Gate["Ship / no-ship"]
+    end
+    Policy -.-> Replay
+    Explain -.-> Quality
+```
+
+Model routes are selected explicitly by the workload, never by inspecting untrusted prompt text. The deterministic policy engine remains the source of truth for every security verdict and host action; a model can only explain or investigate within those boundaries.
+
 ```text
 Agent
   │

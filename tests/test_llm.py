@@ -10,6 +10,7 @@ import llm  # noqa: E402
 import llm_cache  # noqa: E402
 
 _VARS = ("OLLAMA", "OLLAMA_BASE_URL", "OLLAMA_MODEL", "LLM_PROVIDER", "LLM_API_KEY", "LLM_MODEL",
+         "LLM_FAST_MODEL", "LLM_REASONING_MODEL",
          "LLM_BASE_URL", "OPENAI_API_KEY", "OPENAI_MODEL", "OPENAI_BASE_URL", "ANTHROPIC_API_KEY",
          "GEMINI_API_KEY", "GOOGLE_API_KEY", "OPENROUTER_API_KEY", "OPENROUTER_MODEL",
          "OPENROUTER_LLM_MODEL", "OPENROUTER_BASE_URL", "LLM_CACHE", "LLM_CACHE_TTL_SECONDS",
@@ -46,6 +47,18 @@ def test_unknown_provider_is_refused(monkeypatch):
     monkeypatch.setenv("LLM_PROVIDER", "bogus")
     with pytest.raises(SystemExit):
         llm.resolve()
+
+
+def test_explicit_routes_select_configured_models(monkeypatch):
+    monkeypatch.setenv("LLM_PROVIDER", "gemini")
+    monkeypatch.setenv("LLM_API_KEY", "k")
+    monkeypatch.setenv("LLM_FAST_MODEL", "gemini-3.6-flash")
+    monkeypatch.setenv("LLM_REASONING_MODEL", "gemini-3.8-pro")
+    assert llm.routed("fast").model == "gemini-3.6-flash"
+    assert llm.routed("reasoning").model == "gemini-3.8-pro"
+    assert llm.routed("reasoning", "pinned-model").model == "pinned-model"
+    with pytest.raises(ValueError, match="unknown LLM route"):
+        llm.routed("unknown")
 
 
 def test_ollama_switch_is_local_only(monkeypatch):

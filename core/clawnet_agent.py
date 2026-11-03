@@ -136,6 +136,7 @@ class ClawNet:
             _SYSTEM_COPILOT,
             f"Network context:\n{context}\n\nQuestion: {question}",
             max_tokens=600,
+            route="reasoning",
         )
 
     # ── internals ─────────────────────────────────────────────────────────────
@@ -187,7 +188,7 @@ class ClawNet:
                 pass
 
         def _live() -> str:
-            return llm.chat(_SYSTEM_EXPLAIN, json.dumps(payload), max_tokens=100).strip('"')
+            return llm.chat(_SYSTEM_EXPLAIN, json.dumps(payload), max_tokens=100, route="fast").strip('"')
 
         text = replay.transport(payload, _live).strip().strip('"')
         # A model that calls a CRITICAL connection "safe" is worse than silence.

@@ -19,6 +19,7 @@ def isolated(tmp_path, monkeypatch):
     monkeypatch.setenv("CLAWNET_LLM_CACHE_PATH", str(tmp_path / "cache.json"))
     monkeypatch.setattr(telemetry, "PRICES_PATH", tmp_path / "prices.json")
     for v in ("TELEMETRY", "TELEMETRY_CAPTURE_IO", "TELEMETRY_MAX_MB", "LLM_CACHE", "LLM_PROVIDER", "LLM_MODEL",
+              "LLM_FAST_MODEL", "LLM_REASONING_MODEL",
               "LLM_API_KEY", "OLLAMA", "OPENROUTER_API_KEY", "OPENAI_MODEL", "OPENAI_BASE_URL"):
         monkeypatch.delenv(v, raising=False)
     monkeypatch.setenv("OPENAI_API_KEY", "k")
@@ -311,16 +312,22 @@ def test_settings_can_be_changed_but_only_the_safe_ones(tmp_path, monkeypatch):
     env = tmp_path / ".env"
     env.write_text("OPENAI_API_KEY=sk-keep-me\nOLLAMA=no\n# TELEMETRY=yes\nOTHER=1\n", encoding="utf-8")
     monkeypatch.setattr(monitor, "ENV_PATH", str(env))
+    monkeypatch.setenv("OLLAMA", "no")
+    monkeypatch.setenv("TELEMETRY", "yes")
+    monkeypatch.setenv("LLM_FAST_MODEL", "")
+    monkeypatch.setenv("LLM_REASONING_MODEL", "")
     assert "OLLAMA=yes" in monitor.set_setting("ollama", "YES", str(env)) and "/setup" in monitor.set_setting("OLLAMA", "yes", str(env))
     assert monitor.set_setting("TELEMETRY", "no", str(env)).startswith("[green]")
     lines = env.read_text(encoding="utf-8").splitlines()
     assert lines[:2] == ["OPENAI_API_KEY=sk-keep-me", "OLLAMA=yes"] and "OTHER=1" in lines and "TELEMETRY=no" in lines
     assert llm.ollama_enabled() and not telemetry.enabled()          # applied to this process
-    monkeypatch.delenv("OLLAMA"), monkeypatch.delenv("TELEMETRY")
     for key, value in (("LLM_API_KEY", "sk-x"), ("OPENAI_API_KEY", "sk-x"), ("CLAWFORGE_TOKEN", "x")):
         assert "Not a setting" in monitor.set_setting(key, value, str(env))           # secrets are not settable here
     assert "not valid" in monitor.set_setting("LLM_PROVIDER", "bogus", str(env))
     assert "not valid" in monitor.set_setting("OLLAMA", "maybe", str(env))
+    assert "LLM_FAST_MODEL=small-model" in monitor.set_setting("LLM_FAST_MODEL", "small-model", str(env))
+    assert "LLM_REASONING_MODEL=large-model" in _render(monitor.settings("route reasoning large-model"))
+    assert "Usage:" in _render(monitor.settings("route fast"))
     assert env.read_text(encoding="utf-8").count("sk-x") == 0
 
 

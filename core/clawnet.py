@@ -1469,7 +1469,8 @@ def run_copilot() -> None:
         console.print(Panel(
             "[yellow]ClawNet agent unavailable.[/]\n"
             "Set [bold]LLM_API_KEY[/] (or OLLAMA=yes) in .env to enable the copilot.\n"
-            "[dim]Optional: LLM_PROVIDER (openai|anthropic|gemini|openrouter), LLM_MODEL.[/dim]",
+            "[dim]Optional: LLM_PROVIDER (openai|anthropic|gemini|openrouter), LLM_MODEL, "
+            "LLM_FAST_MODEL, LLM_REASONING_MODEL.[/dim]",
             border_style="yellow",
         ))
         return

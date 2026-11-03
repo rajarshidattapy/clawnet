@@ -57,7 +57,7 @@ def trueforge_url() -> str:
 
 def agent_model_id(p: "llm.Provider | None" = None) -> str:
     """CLAWFORGE_MODEL (an OpenAI model id) for OpenAI; every other provider uses its own model."""
-    p = p or llm.resolve()
+    p = p or llm.routed("reasoning")
     return (os.environ.get("CLAWFORGE_MODEL", "").strip() or p.model) if p.name == "openai" else p.model
 
 
@@ -75,6 +75,8 @@ def key_works(p: "llm.Provider") -> bool:
     import requests
     if p.name == "anthropic":
         url, headers = p.base_url + "/models", {"x-api-key": p.api_key, "anthropic-version": "2023-06-01"}
+    elif p.name == "gemini":
+        url, headers = p.base_url + "/models", {"x-goog-api-key": p.api_key}
     else:
         url, headers = p.base_url + "/models", {"Authorization": f"Bearer {p.api_key}"}
     try:
@@ -86,7 +88,7 @@ def key_works(p: "llm.Provider") -> bool:
 def agent_provider() -> "llm.Provider":
     """The provider the TrueForge agent runs on: the configured one, or OpenRouter when that
     one has no key or rejects it (never with OLLAMA=yes, which stays on this machine)."""
-    p = llm.resolve()
+    p = llm.routed("reasoning")
     if p.local:
         return p
     backup = llm.fallback()

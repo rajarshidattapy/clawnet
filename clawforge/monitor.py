@@ -11,6 +11,7 @@ and shows them as metrics, tables and trace trees. Nothing here talks to a serve
     /settings trace <id>           one trace as a tree with a latency waterfall, I/O and scores
     /settings models | tools       the per-model / per-tool tables
     /settings sessions             one row per agent session
+    /settings route fast|reasoning MODEL  choose a model for that workload (saved to .env)
     /settings set KEY VALUE        change a setting (saved to .env, applied now)
     /settings price MODEL IN OUT   dollars per million input / output tokens, for cost
     /settings clear                delete the trace log
@@ -43,12 +44,14 @@ SETTINGS = {         # key -> (what it is, validator). Only non-secret switches 
     "OLLAMA": ("yes = local model only, no cloud call", YES_NO),
     "LLM_PROVIDER": ("openai | anthropic | gemini | openrouter", lambda v: v.lower() in llm.PROVIDERS),
     "LLM_MODEL": ("model id for the chosen provider", lambda v: 0 < len(v) <= 100 and " " not in v),
+    "LLM_FAST_MODEL": ("small/fast model for short explanations", lambda v: 0 < len(v) <= 100 and " " not in v),
+    "LLM_REASONING_MODEL": ("larger model for copilot and agent work", lambda v: 0 < len(v) <= 100 and " " not in v),
     "OLLAMA_MODEL": ("local model, e.g. llama3.1", lambda v: 0 < len(v) <= 100 and " " not in v),
     "LLM_CACHE": ("cache answers by prompt hash", YES_NO),
     "TELEMETRY": ("record traces and metrics", YES_NO),
     "TELEMETRY_CAPTURE_IO": ("store redacted prompts and answers in traces", YES_NO),
 }
-_NEEDS_SETUP = {"OLLAMA", "LLM_PROVIDER", "LLM_MODEL", "OLLAMA_MODEL"}
+_NEEDS_SETUP = {"OLLAMA", "LLM_PROVIDER", "LLM_MODEL", "LLM_FAST_MODEL", "LLM_REASONING_MODEL", "OLLAMA_MODEL"}
 
 
 # ── formatting ────────────────────────────────────────────────────────────────
@@ -196,20 +199,24 @@ def traces_table(rows: list, title: str = "Recent traces") -> Panel:
 def config_panel() -> Panel:
     try:
         p = llm.resolve()
+        fast, reasoning = llm.routed("fast"), llm.routed("reasoning")
         backup = llm.fallback()
         model = f"{p.name} · {p.model}" + (" (local)" if p.local else "")
         key = "n/a" if p.local else ("set" if p.api_key else "[yellow]missing[/yellow]")
         fb = f"{backup.name} · {backup.model}" if backup else "none"
     except SystemExit as exc:
-        model, key, fb = f"[red]{exc}[/red]", "?", "?"
+        model, key, fb, fast, reasoning = f"[red]{exc}[/red]", "?", "?", None, None
     cache = llm_cache.stats()
     size = telemetry.path().stat().st_size if telemetry.path().exists() else 0
     onoff = lambda b: "[green]on[/green]" if b else "[red]off[/red]"      # noqa: E731
     t = Table.grid(padding=(0, 2))
     t.add_row("[bold]LLM[/bold]", model, "key", key, "fallback", fb)
+    if fast is not None and reasoning is not None:
+        t.add_row("[bold]Routes[/bold]", f"fast: {fast.model}", "reasoning", reasoning.model, "", "")
     t.add_row("[bold]Ollama[/bold]", onoff(llm.ollama_enabled()), "cache", f"{onoff(cache['enabled'])} {cache['entries']} entries",
               "telemetry", f"{onoff(telemetry.enabled())} io {onoff(telemetry.capture_io())} {size / 1024:.0f} KB")
     t.add_row("[bold]Access[/bold]", f"service token = {rbac.service_role()}", "", "", "prices", f"{len(telemetry.load_prices())} set")
+    t.add_row("", "[dim]/settings route fast|reasoning MODEL[/dim]")
     t.add_row("", "[dim]/settings set OLLAMA yes|no · LLM_PROVIDER · LLM_MODEL · LLM_CACHE · TELEMETRY · TELEMETRY_CAPTURE_IO[/dim]")
     return Panel(t, title="[bold]Settings[/bold]", border_style="bright_black")
 
@@ -350,6 +357,11 @@ def settings(arg: str, records: Optional[list] = None):
         return models_table(m) if cmd == "models" else tools_table(m)
     if cmd == "sessions":
         return sessions_table(records, period)
+    if cmd == "route":
+        route_keys = {"fast": "LLM_FAST_MODEL", "reasoning": "LLM_REASONING_MODEL"}
+        if len(words) != 3 or words[1].lower() not in route_keys:
+            return Text.from_markup("Usage: /settings route fast|reasoning MODEL")
+        return Text.from_markup(set_setting(route_keys[words[1].lower()], words[2]))
     if cmd == "set":
         if len(words) < 3:
             return Text.from_markup("Usage: /settings set KEY VALUE. Settable: " + ", ".join(f"{k} ({v[0]})" for k, v in SETTINGS.items()))

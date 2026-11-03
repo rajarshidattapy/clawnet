@@ -84,6 +84,7 @@ In the console (`python -m clawforge`):
 | `/settings trace <id>` | one trace as a tree with a latency waterfall, per-span tokens and cost, provider attempts, redaction counts, input/output, and its scores (an id prefix is enough) |
 | `/settings models` · `tools` | the per-model and per-tool tables |
 | `/settings sessions` | one row per agent session |
+| `/settings route fast\|reasoning MODEL` | choose the small/fast or larger reasoning model, saved to `.env` and applied now |
 | `/settings set KEY VALUE` | change a setting, saved to `.env` and applied now |
 | `/settings price MODEL IN OUT` | set a model's price for cost |
 | `/settings clear` | delete the trace log (asks first) |
@@ -104,7 +105,7 @@ In the console (`python -m clawforge`):
 - **Per day**: a bar per day for the last 7 days, with tokens, calls and cost.
 - **Recent traces** and the **Settings** panel.
 
-**Settings you can change** from the console (non-secret switches only; keys and tokens cannot be set this way): `OLLAMA`, `LLM_PROVIDER`, `LLM_MODEL`, `OLLAMA_MODEL`, `LLM_CACHE`, `TELEMETRY`, `TELEMETRY_CAPTURE_IO`. A change rewrites only that line of `.env`. Changing `OLLAMA`, `LLM_PROVIDER` or a model also needs `/setup` so the TrueForge agent switches too; the console says so.
+**Settings you can change** from the console (non-secret switches only; keys and tokens cannot be set this way): `OLLAMA`, `LLM_PROVIDER`, `LLM_MODEL`, `LLM_FAST_MODEL`, `LLM_REASONING_MODEL`, `OLLAMA_MODEL`, `LLM_CACHE`, `TELEMETRY`, `TELEMETRY_CAPTURE_IO`. A change rewrites only that line of `.env`. Changing `OLLAMA`, `LLM_PROVIDER` or a model also needs `/setup` so the TrueForge agent switches too; the console says so.
 
 ### Metrics, exactly
 

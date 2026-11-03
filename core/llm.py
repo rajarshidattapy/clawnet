@@ -11,6 +11,8 @@ register the same provider in TrueForge. Configuration comes from the environmen
     LLM_PROVIDER         openai | anthropic | gemini | openrouter   (default openai)
     LLM_API_KEY          key for that provider
     LLM_MODEL            default per provider (below)
+    LLM_FAST_MODEL       model for short, low-cost explanations (defaults to LLM_MODEL)
+    LLM_REASONING_MODEL  model for copilot/deeper analysis (defaults to LLM_MODEL)
     LLM_BASE_URL         override the provider endpoint
 
     OPENAI_API_KEY / ANTHROPIC_API_KEY / GEMINI_API_KEY / OPENROUTER_API_KEY
@@ -48,6 +50,7 @@ except ImportError:
     from core.guardrails import redact_report  # type: ignore
 
 PROVIDERS = ("openai", "anthropic", "gemini", "openrouter")
+ROUTES = ("fast", "reasoning")
 
 # provider -> (base url, default model, per-provider key env)
 _DEFAULTS = {
@@ -123,6 +126,22 @@ def resolve() -> Provider:
     if name not in PROVIDERS:
         raise SystemExit(f"LLM_PROVIDER={name!r} is not supported; use one of: {', '.join(PROVIDERS)}")
     return _provider(name, chosen=True)
+
+
+def routed(route: Optional[str] = None, model: Optional[str] = None) -> Provider:
+    """Resolve a provider for an explicit workload route.
+
+    An explicit ``model`` wins over a route so reproducible callers such as quality
+    evaluations can pin their model. Routes never infer intent from prompt content.
+    """
+    provider = resolve()
+    if model:
+        return replace(provider, model=model)
+    if route is None:
+        return provider
+    if route not in ROUTES:
+        raise ValueError(f"unknown LLM route {route!r}; use one of: {', '.join(ROUTES)}")
+    return replace(provider, model=_env(f"LLM_{route.upper()}_MODEL") or provider.model)
 
 
 def fallback() -> Optional[Provider]:
@@ -209,11 +228,15 @@ def _complete(p: Provider, system: str, user: str, max_tokens: int,
 
 
 def chat(system: str, user: str, *, max_tokens: int = 200,
-         temperature: float = 0.0, timeout: int = 60, model: Optional[str] = None) -> str:
+         temperature: float = 0.0, timeout: int = 60, model: Optional[str] = None,
+         route: Optional[str] = None) -> str:
     """One-shot chat completion. Returns the model's text answer, redacted of secrets and PII.
 
     `model` overrides the model id on the chosen provider (the quality eval uses it to judge
     with a different model than the one being judged).
+    `route` is an explicit workload class: ``fast`` for economical short answers or
+    ``reasoning`` for deeper copilot analysis. Both fall back to the normal provider model
+    unless their corresponding LLM_*_MODEL variable is set.
 
     temperature defaults to 0 — ClawNet wants the explanation to be as stable as
     the deterministic verdict it narrates. Tries the chosen provider first; if its key is
@@ -224,9 +247,10 @@ def chat(system: str, user: str, *, max_tokens: int = 200,
     cache hit, and each provider attempt.
     """
     # Only deterministic calls are cached: at temperature 0 the same prompt means the same answer.
-    primary = replace(resolve(), model=model) if model else resolve()
+    primary = routed(route, model)
     cacheable = llm_cache.enabled() and temperature == 0
     with telemetry.span("llm.chat", "generation", provider=primary.name, model=primary.model,
+                        route=route or "default",
                         max_tokens=max_tokens,
                         prompt_hash=hashlib.sha256(system.encode("utf-8")).hexdigest()[:12]) as sp:
         sp.set_io(input=user)

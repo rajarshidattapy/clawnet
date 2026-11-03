@@ -873,7 +873,7 @@ def _ai_sandbox_explain(level: str, score: int, reasons: list[str], meta: dict) 
         "threat_intelligence is present, cite only its CVEs, sources, dates, or summaries."
     )
     try:
-        return llm.chat(system, json.dumps(payload), max_tokens=100).strip('"')[:160]
+        return llm.chat(system, json.dumps(payload), max_tokens=100, route="fast").strip('"')[:160]
     except Exception:
         return ""
 
