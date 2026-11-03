@@ -86,10 +86,20 @@ def preflight() -> list[Check]:
     harness.load_env()
     checks: list[Check] = []
 
-    key = os.environ.get("OPENAI_API_KEY", "").strip()
-    checks.append(Check("OpenAI key", bool(key),
-                        f"set, model {harness.agent_model_id()}" if key else "OPENAI_API_KEY missing",
-                        "" if key else "add OPENAI_API_KEY=sk-... to .env"))
+    import llm
+    chosen = llm.resolve()
+    backup = llm.fallback()
+    if chosen.local:
+        checks.append(Check("LLM (local)", True, f"Ollama {chosen.model} at {chosen.base_url}"))
+    elif chosen.api_key:
+        checks.append(Check(f"LLM ({chosen.name})", True, f"key set, model {harness.agent_model_id(chosen)}"
+                            + (" · openrouter fallback" if backup else "")))
+    elif backup:
+        checks.append(Check(f"LLM ({chosen.name})", True,
+                            f"no key; using openrouter, model {backup.model}"))
+    else:
+        checks.append(Check(f"LLM ({chosen.name})", False, f"no API key for {chosen.name}",
+                            "set LLM_API_KEY in .env, or OLLAMA=yes for a local model"))
 
     tf = harness.trueforge_url()
     tf_up = _http_status(f"{tf}/api/v1/agents?limit=1") == 200

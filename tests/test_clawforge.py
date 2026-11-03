@@ -94,11 +94,41 @@ def test_mcp_endpoint_requires_the_bearer_token():
     async def send(msg):
         sent.append(msg.get("status"))
 
-    app = mcp_server.BearerAuth(inner, "secret")
+    app = mcp_server.TokenAuth(inner, "secret")
     asyncio.run(app({"type": "http", "headers": []}, None, send))
     asyncio.run(app({"type": "http", "headers": [(b"authorization", b"Bearer wrong")]}, None, send))
     asyncio.run(app({"type": "http", "headers": [(b"authorization", b"Bearer secret")]}, None, send))
     assert sent == [401, None, 401, None, "app"]
+
+
+def test_mcp_endpoint_accepts_only_valid_jwts():
+    import time
+    import jwt
+    verifier = mcp_server.JwtVerifier(issuer="https://idp.test", audience="clawforge", key="k" * 32)
+    sent = []
+
+    async def inner(scope, receive, send):
+        sent.append(scope["clawforge.principal"]["sub"])
+
+    async def send(msg):
+        sent.append(msg.get("status"))
+
+    def call(token):
+        h = [(b"authorization", f"Bearer {token}".encode())]
+        asyncio.run(mcp_server.TokenAuth(inner, "static", verifier)({"type": "http", "headers": h}, None, send))
+
+    def mint(**over):
+        claims = {"sub": "alice", "iss": "https://idp.test", "aud": "clawforge", "exp": time.time() + 60, **over}
+        return jwt.encode(claims, "k" * 32, algorithm="HS256")
+
+    call(mint())                          # valid
+    call(mint(exp=time.time() - 5))       # expired
+    call(mint(aud="other"))               # wrong audience
+    call(mint(iss="https://evil.test"))   # wrong issuer
+    call(jwt.encode({"sub": "x", "iss": "https://idp.test", "aud": "clawforge", "exp": time.time() + 60},
+                    "z" * 32, algorithm="HS256"))   # bad signature
+    call("static")                        # the TrueForge service token still works
+    assert sent == ["alice", 401, None, 401, None, 401, None, 401, None, "service"]
 
 
 def test_harness_owns_the_state_machine():

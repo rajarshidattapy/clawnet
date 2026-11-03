@@ -107,6 +107,11 @@ _DEFAULT_POLICY: dict[str, Any] = {
     "require_signature": False,   # chain of trust: fail unsigned repos outright
     "deny_env_keys": [
         "OPENAI_API_KEY",
+        "LLM_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "GEMINI_API_KEY",
+        "GOOGLE_API_KEY",
+        "OPENROUTER_API_KEY",
         "SUPERMEMORY_API_KEY",
         "TELEGRAM_BOT_TOKEN",
         "TELEGRAM_CHAT_ID",

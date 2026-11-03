@@ -61,7 +61,7 @@ Ok "python   $Py"
 $EnvFile = Join-Path $Root ".env"
 if (-not (Test-Path $EnvFile)) {
     Copy-Item (Join-Path $Root ".env.example") $EnvFile
-    Warn ".env created from .env.example; set OPENAI_API_KEY in it, then re-run."
+    Warn ".env created from .env.example; set LLM_PROVIDER and LLM_API_KEY (or OLLAMA=yes) in it, then re-run."
 }
 $Cfg = @{}
 foreach ($line in Get-Content $EnvFile -Encoding UTF8) {
@@ -77,7 +77,13 @@ function Cfg($name, $default) {
     if ($Cfg[$name]) { return $Cfg[$name] }
     return $default
 }
-if (-not (Cfg "OPENAI_API_KEY" "")) { Warn "OPENAI_API_KEY is empty in .env; the agent cannot run without it." }
+# An LLM is configured when Ollama is on, or any provider key is set (see .env.example).
+$UseOllama = @("yes", "true", "1", "on") -contains (Cfg "OLLAMA" "no").ToLower()
+$HasLlm = $UseOllama -or [bool](
+    (Cfg "LLM_API_KEY" "") -or (Cfg "OPENAI_API_KEY" "") -or (Cfg "ANTHROPIC_API_KEY" "") -or
+    (Cfg "GEMINI_API_KEY" "") -or (Cfg "OPENROUTER_API_KEY" ""))
+if ($UseOllama) { Ok "llm      Ollama (local)" }
+elseif (-not $HasLlm) { Warn "no LLM key in .env (LLM_API_KEY, or OLLAMA=yes); the agent cannot run without one." }
 
 $TfUrl   = (Cfg "TRUEFORGE_BASE_URL" "http://localhost:8790").TrimEnd("/")
 $McpHost = Cfg "CLAWFORGE_HOST" "127.0.0.1"
@@ -225,7 +231,7 @@ if ($Supermemory) {
 }
 
 # -- register agent + connector in TrueForge -----------------------------------
-if (-not $SkipSetup -and (Cfg "OPENAI_API_KEY" "")) {
+if (-not $SkipSetup -and $HasLlm) {
     Info "registering provider, connector and agent in TrueForge"
     & $Py -m clawforge setup
     if ($LASTEXITCODE -ne 0) { Warn "setup failed; run /setup from the console once the cause is fixed." }

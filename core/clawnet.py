@@ -750,7 +750,7 @@ def _run_chat_command(state: "ClawState", oc, msg: str) -> str:
         with state.lock:
             conns = list(state.connections)
         return oc.copilot(msg, _build_context(conns))
-    return "ClawNet AI unavailable — set OPENAI_API_KEY to enable."
+    return "ClawNet AI unavailable — set LLM_API_KEY (or OLLAMA=yes) to enable."
 
 
 def _chat_worker(state: "ClawState", oc) -> None:
@@ -1215,7 +1215,7 @@ def build_clawnet_panel(oc, tg, state: "ClawState") -> Panel:
     else:
         if not oc.available:
             lines.append("[dim]Verdicts live (policy engine). AI explanations off — "
-                         "set [yellow]OPENAI_API_KEY[/yellow] to enable.[/dim]")
+                         "set [yellow]LLM_API_KEY[/yellow] (or OLLAMA=yes) to enable.[/dim]")
             lines.append("")
 
         analyses   = oc.all_analyses()
@@ -1468,8 +1468,8 @@ def run_copilot() -> None:
     if oc is None or not oc.available:
         console.print(Panel(
             "[yellow]ClawNet agent unavailable.[/]\n"
-            "Set [bold]OPENAI_API_KEY[/] in .env to enable the copilot.\n"
-            "[dim]Optional: OPENAI_MODEL (default gpt-5.4-mini), OPENAI_BASE_URL.[/dim]",
+            "Set [bold]LLM_API_KEY[/] (or OLLAMA=yes) in .env to enable the copilot.\n"
+            "[dim]Optional: LLM_PROVIDER (openai|anthropic|gemini|openrouter), LLM_MODEL.[/dim]",
             border_style="yellow",
         ))
         return

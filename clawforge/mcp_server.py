@@ -12,8 +12,9 @@ The approval line is drawn with MCP tool annotations, which TrueForge reads:
 
 Defense in depth: after a human approves, the ClawNet guardrails still run and
 can refuse (protected processes, private IPs, System32, failed chain of trust).
-Every request needs the bearer token, so nothing but the registered TrueForge
-connector can reach the CONTROL tools.
+Every request needs a bearer credential: the static service token the registered TrueForge
+connector sends, or an OAuth/JWT access token when JWT auth is configured (JwtVerifier).
+Nothing else can reach the CONTROL tools.
 """
 from __future__ import annotations
 
@@ -246,26 +247,92 @@ CONTROL_TOOLS = ("kill_process", "suspend_process", "block_ip", "quarantine_file
 
 # ── transport ─────────────────────────────────────────────────────────────────
 
-class BearerAuth:
-    """Pure-ASGI bearer-token check in front of the MCP app."""
+class JwtVerifier:
+    """Verifies OAuth2 / OIDC access tokens (JWTs): signature, expiry, issuer and audience.
 
-    def __init__(self, app, expected: str) -> None:
+    Keys come from CLAWFORGE_JWKS_URL (the identity provider's JWKS endpoint) or a fixed
+    CLAWFORGE_JWT_KEY (PEM public key, or a shared secret for HS256). CLAWFORGE_JWT_ISSUER
+    and CLAWFORGE_JWT_AUDIENCE are required, so a token minted for another service is refused.
+    """
+
+    def __init__(self, *, issuer: str, audience: str, jwks_url: str = "", key: str = "",
+                 algorithms: Optional[list] = None) -> None:
+        import jwt
+        self._jwt = jwt
+        self.issuer, self.audience = issuer, audience
+        self.algorithms = algorithms or (["HS256"] if key and "BEGIN" not in key
+                                         else ["RS256", "ES256"])
+        self._jwks = jwt.PyJWKClient(jwks_url, cache_keys=True) if jwks_url else None
+        self._key = key
+
+    @classmethod
+    def from_env(cls) -> "Optional[JwtVerifier]":
+        jwks = os.environ.get("CLAWFORGE_JWKS_URL", "").strip()
+        key = os.environ.get("CLAWFORGE_JWT_KEY", "").strip()
+        if not (jwks or key):
+            return None
+        issuer = os.environ.get("CLAWFORGE_JWT_ISSUER", "").strip()
+        audience = os.environ.get("CLAWFORGE_JWT_AUDIENCE", "").strip()
+        if not issuer or not audience:
+            raise SystemExit("CLAWFORGE_JWT_ISSUER and CLAWFORGE_JWT_AUDIENCE are required "
+                             "when JWT auth is enabled.")
+        algs = [a.strip() for a in os.environ.get("CLAWFORGE_JWT_ALGORITHMS", "").split(",") if a.strip()]
+        return cls(issuer=issuer, audience=audience, jwks_url=jwks, key=key, algorithms=algs or None)
+
+    def verify(self, raw: str) -> Optional[dict]:
+        """The token's claims when valid, else None."""
+        try:
+            key = self._jwks.get_signing_key_from_jwt(raw).key if self._jwks else self._key
+            return self._jwt.decode(raw, key, algorithms=self.algorithms, issuer=self.issuer,
+                                    audience=self.audience,
+                                    options={"require": ["exp", "iss", "aud"]})
+        except Exception:   # bad signature, expired, wrong iss/aud, JWKS unreachable ...
+            return None
+
+
+class TokenAuth:
+    """Pure-ASGI bearer check in front of the MCP app.
+
+    Accepts a verified OAuth/JWT access token (when a JwtVerifier is configured) or the
+    static service token the registered TrueForge connector sends. Pass static_token=None
+    to require JWTs only. The caller's identity (JWT `sub`, or "service") is left in
+    scope["clawforge.principal"] for audit and role checks.
+    """
+
+    def __init__(self, app, static_token: Optional[str], verifier: Optional[JwtVerifier] = None) -> None:
         self.app = app
-        self.expected = f"Bearer {expected}".encode()
+        self.static = f"Bearer {static_token}".encode() if static_token else None
+        self.verifier = verifier
+
+    def _principal(self, header: bytes) -> Optional[dict]:
+        if self.static and hmac.compare_digest(header, self.static):
+            return {"sub": "service", "auth": "static-token"}
+        if self.verifier and header[:7].lower() == b"bearer ":
+            claims = self.verifier.verify(header[7:].decode("ascii", "ignore").strip())
+            if claims is not None:
+                return {"sub": claims.get("sub", "unknown"), "auth": "jwt", "claims": claims}
+        return None
 
     async def __call__(self, scope, receive, send):
         if scope["type"] == "http":
             headers = dict(scope.get("headers") or [])
-            if not hmac.compare_digest(headers.get(b"authorization", b""), self.expected):
+            principal = self._principal(headers.get(b"authorization", b""))
+            if principal is None:
                 await send({"type": "http.response.start", "status": 401,
-                            "headers": [(b"content-type", b"application/json")]})
+                            "headers": [(b"content-type", b"application/json"),
+                                        (b"www-authenticate", b'Bearer error="invalid_token"')]})
                 await send({"type": "http.response.body", "body": b'{"error":"unauthorized"}'})
                 return
+            scope["clawforge.principal"] = principal
         await self.app(scope, receive, send)
 
 
 def app():
-    return BearerAuth(mcp.streamable_http_app(), token())
+    jwt_only = os.environ.get("CLAWFORGE_JWT_ONLY", "").strip().lower() in ("1", "true", "yes")
+    verifier = JwtVerifier.from_env()
+    if jwt_only and verifier is None:
+        raise SystemExit("CLAWFORGE_JWT_ONLY needs CLAWFORGE_JWKS_URL or CLAWFORGE_JWT_KEY.")
+    return TokenAuth(mcp.streamable_http_app(), None if jwt_only else token(), verifier)
 
 
 def url() -> str:
@@ -293,6 +360,8 @@ def serve() -> None:
                                         "code_mtime": code_mtime()}), encoding="utf-8")
     print(f"ClawForge MCP server  ->  {url()}")
     print(f"Bearer token file     ->  {TOKEN_PATH if not os.environ.get('CLAWFORGE_TOKEN') else '$CLAWFORGE_TOKEN'}")
+    if os.environ.get("CLAWFORGE_JWKS_URL") or os.environ.get("CLAWFORGE_JWT_KEY"):
+        print(f"JWT auth              ->  enabled (issuer {os.environ.get('CLAWFORGE_JWT_ISSUER')})")
     uvicorn.run(app(), host=host(), port=port(), log_level="warning")
 
 

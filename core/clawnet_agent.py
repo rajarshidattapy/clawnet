@@ -128,7 +128,7 @@ class ClawNet:
 
     def copilot(self, question: str, context: str) -> str:
         if not self._ok:
-            return "ClawNet agent unavailable — set OPENAI_API_KEY to enable AI features."
+            return "ClawNet agent unavailable — set LLM_API_KEY (or OLLAMA=yes) to enable AI features."
         return llm.chat(
             _SYSTEM_COPILOT,
             f"Network context:\n{context}\n\nQuestion: {question}",

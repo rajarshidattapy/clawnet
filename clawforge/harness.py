@@ -1,7 +1,7 @@
 """ClawForge harness driver — runs the ClawForge agent on TrueForge.
 
     setup()  registers, in the running TrueForge server:
-               · the OpenAI model provider (OPENAI_API_KEY)
+               · the model provider (LLM_PROVIDER: openai | anthropic | gemini | openrouter, or Ollama)
                · the `clawnet` MCP connector (the ClawForge MCP server + bearer token)
                · the `clawforge` agent, whose CONTROL tools require approval
     run()    opens a session, streams the agent's work, and stops at every approval
@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 from typing import Any, Optional
 
 import clawforge  # noqa: F401  (puts core/ on sys.path)
+import llm
 from clawforge.mcp_server import CONTROL_TOOLS, EXECUTE_TOOLS, token as mcp_token, url as mcp_url
 
 from rich.console import Console
@@ -51,12 +52,49 @@ def trueforge_url() -> str:
     return os.environ.get("TRUEFORGE_BASE_URL", "http://localhost:8790")
 
 
-def agent_model_id() -> str:
-    return os.environ.get("CLAWFORGE_MODEL", "gpt-5.4-mini")
+def agent_model_id(p: "llm.Provider | None" = None) -> str:
+    """CLAWFORGE_MODEL (an OpenAI model id) for OpenAI; every other provider uses its own model."""
+    p = p or llm.resolve()
+    return (os.environ.get("CLAWFORGE_MODEL", "").strip() or p.model) if p.name == "openai" else p.model
 
 
 def _resource_name(model_id: str) -> str:
-    return model_id.lower().replace(".", "-").replace("_", "-")
+    return model_id.lower().replace(".", "-").replace("_", "-").replace("/", "-").replace(":", "-")
+
+
+# TrueForge provider name for each LLM_PROVIDER (typed providers are named after their type).
+_TF_NAME = {"openai": "openai", "anthropic": "anthropic", "gemini": "google-gemini",
+            "openrouter": "openrouter", "ollama": "ollama"}
+
+
+def key_works(p: "llm.Provider") -> bool:
+    """False only when the provider definitively rejects its key or cannot be reached."""
+    import requests
+    if p.name == "anthropic":
+        url, headers = p.base_url + "/models", {"x-api-key": p.api_key, "anthropic-version": "2023-06-01"}
+    else:
+        url, headers = p.base_url + "/models", {"Authorization": f"Bearer {p.api_key}"}
+    try:
+        return requests.get(url, headers=headers, timeout=10).status_code not in (401, 403)
+    except requests.RequestException:
+        return False
+
+
+def agent_provider() -> "llm.Provider":
+    """The provider the TrueForge agent runs on: the configured one, or OpenRouter when that
+    one has no key or rejects it (never with OLLAMA=yes, which stays on this machine)."""
+    p = llm.resolve()
+    if p.local:
+        return p
+    backup = llm.fallback()
+    if backup is not None and not (p.api_key and key_works(p)):
+        return backup
+    return p
+
+
+def model_ref(p: "llm.Provider") -> str:
+    """The agent manifest's model name for a registered provider."""
+    return f"{_TF_NAME[p.name]}/{_resource_name(agent_model_id(p))}"
 
 
 def client():
@@ -127,9 +165,9 @@ def load_skill() -> str:
     return header + text.strip()
 
 
-def manifest() -> dict:
+def manifest(provider: "llm.Provider | None" = None) -> dict:
     return {
-        "model": {"name": f"openai/{_resource_name(agent_model_id())}"},
+        "model": {"name": model_ref(provider or llm.resolve())},
         "instructions": INSTRUCTIONS + load_skill(),
         "mcp_servers": [{
             "name": MCP_NAME,
@@ -154,22 +192,41 @@ def manifest() -> dict:
 # ── setup ─────────────────────────────────────────────────────────────────────
 
 def setup() -> None:
-    from trueforge_sdk import (ConfiguredModel, McpServerHeaderAuth, ModelProperties,
+    from trueforge_sdk import (AnthropicModelProvider, ConfiguredModel, CustomModelProvider,
+                               GoogleGeminiModelProvider, McpServerHeaderAuth, ModelProperties,
                                ModelProviderAuth, OpenAiModelProvider, RemoteMcpServerManifest)
     load_env()
     c = client()
-    key = os.environ.get("OPENAI_API_KEY", "").strip()
-    if not key:
-        raise SystemExit("OPENAI_API_KEY is not set (.env). TrueForge needs it to run the agent.")
+    chosen = llm.resolve()
+    if not chosen.local and not chosen.api_key and llm.fallback() is None:
+        raise SystemExit(f"No API key for LLM_PROVIDER={chosen.name}. Set LLM_API_KEY in .env, "
+                         "or OLLAMA=yes to use a local model. TrueForge needs one to run the agent.")
 
-    model_id = agent_model_id()
-    c.settings.model_providers.create_or_update(manifest=OpenAiModelProvider(
-        type="openai",
-        auth=ModelProviderAuth(api_key=key),
-        models=[ConfiguredModel(model_id=model_id, name=_resource_name(model_id),
-                                properties=ModelProperties())],
-    ))
-    console.print(f"[green]✓[/green] model provider  openai/{_resource_name(model_id)}")
+    provider = agent_provider()
+    model_id = agent_model_id(provider)
+    # OpenRouter reserves credit for max_output_tokens up front, so cap it (default 4096).
+    props = (ModelProperties(max_output_tokens=int(os.environ.get("OPENROUTER_MAX_OUTPUT_TOKENS", "4096")))
+             if provider.name == "openrouter" else ModelProperties())
+    models = [ConfiguredModel(model_id=model_id, name=_resource_name(model_id), properties=props)]
+    # TrueForge requires an auth block on every provider; Ollama ignores the key.
+    auth = ModelProviderAuth(api_key=provider.api_key or "ollama")
+    if provider.name == "openai":
+        manifest_ = OpenAiModelProvider(type="openai", auth=auth, base_url=provider.base_url, models=models)
+    elif provider.name == "anthropic":
+        manifest_ = AnthropicModelProvider(type="anthropic", auth=auth, base_url=provider.base_url, models=models)
+    elif provider.name == "gemini":
+        manifest_ = GoogleGeminiModelProvider(
+            type="google-gemini", auth=auth, models=models,
+            **({"base_url": os.environ["LLM_BASE_URL"]} if os.environ.get("LLM_BASE_URL") else {}))
+    else:   # openrouter, ollama: OpenAI-compatible endpoints
+        manifest_ = CustomModelProvider(type="custom", name=provider.name, base_url=provider.base_url,
+                                        auth=auth, models=models)
+    c.settings.model_providers.create_or_update(manifest=manifest_)
+    if provider.name != chosen.name:
+        console.print(f"[yellow]![/yellow] {chosen.name} key missing or rejected, "
+                      f"falling back to {provider.name}")
+    console.print(f"[green]✓[/green] model provider  {model_ref(provider)}"
+                  + (" (local, nothing leaves this machine)" if provider.local else ""))
 
     c.settings.mcp_servers.create_or_update(manifest=RemoteMcpServerManifest(
         type="remote", name=MCP_NAME, url=mcp_url(),
@@ -190,10 +247,10 @@ def setup() -> None:
     existing = next(iter(c.agents.list(agent_name=AGENT_NAME)), None)
     description = "Security operator that investigates this machine through ClawNet and stops before anything irreversible."
     if existing is not None:
-        c.agents.update(agent_id=existing.id, manifest=manifest(), description=description)
+        c.agents.update(agent_id=existing.id, manifest=manifest(provider), description=description)
         console.print(f"[green]✓[/green] agent updated   {AGENT_NAME}")
     else:
-        c.agents.create(name=AGENT_NAME, description=description, manifest=manifest())
+        c.agents.create(name=AGENT_NAME, description=description, manifest=manifest(provider))
         console.print(f"[green]✓[/green] agent created   {AGENT_NAME}")
     console.print(f"\nOpen the TrueForge chat UI at {trueforge_url()} and pick '{AGENT_NAME}', "
                   "or run: [bold]python -m clawforge run \"<task>\"[/bold]")
