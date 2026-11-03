@@ -32,7 +32,7 @@ def test_default_is_openai_and_legacy_key_still_works(monkeypatch):
 @pytest.mark.parametrize("name,model,url", [
     ("openai", "gpt-5.4-mini", "https://api.openai.com/v1"),
     ("anthropic", "claude-haiku-5-5", "https://api.anthropic.com/v1"),
-    ("gemini", "gemini-2.5-flash", "https://generativelanguage.googleapis.com/v1beta/openai"),
+    ("gemini", "gemini-3.6-flash", "https://generativelanguage.googleapis.com/v1beta"),
     ("openrouter", "openai/gpt-5.4-mini", "https://openrouter.ai/api/v1"),
 ])
 def test_llm_api_key_serves_every_provider(monkeypatch, name, model, url):
@@ -102,6 +102,23 @@ def test_request_shapes_and_fallback(monkeypatch):
     assert url == "https://api.anthropic.com/v1/messages"
     assert kw["headers"]["x-api-key"] == "a" and kw["json"]["system"] == "sys"
     assert calls[1][0] == "https://openrouter.ai/api/v1/chat/completions"
+
+
+def test_gemini_uses_native_generate_content(monkeypatch):
+    seen = {}
+
+    def post(url, **kw):
+        seen.update(url=url, **kw)
+        return _Resp(True, {"candidates": [{"content": {"parts": [{"text": "native"}]}}],
+                            "usageMetadata": {"promptTokenCount": 3, "candidatesTokenCount": 1}})
+
+    monkeypatch.setattr(requests, "post", post)
+    monkeypatch.setenv("LLM_PROVIDER", "gemini")
+    monkeypatch.setenv("LLM_API_KEY", "k")
+    assert llm.chat("sys", "usr") == "native"
+    assert seen["url"] == "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent"
+    assert seen["headers"] == {"x-goog-api-key": "k"}
+    assert seen["json"]["systemInstruction"]["parts"][0]["text"] == "sys"
 
 
 def test_ollama_call_is_keyless_and_local(monkeypatch):

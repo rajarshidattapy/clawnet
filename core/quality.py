@@ -34,9 +34,12 @@ import json
 import os
 import re
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
+
+import requests
 
 try:
     import llm
@@ -126,9 +129,22 @@ def build(case: dict):
 
 # ── generator and judge ───────────────────────────────────────────────────────
 
+def _retrying(call: Callable, tries: int = 5, wait: float = 10.0):
+    """Run a model call, waiting out rate limits and brief provider outages (429/502/503) so a
+    live eval on a shared or free tier does not die halfway."""
+    for attempt in range(tries):
+        try:
+            return call()
+        except requests.RequestException as exc:
+            status = getattr(getattr(exc, "response", None), "status_code", None)
+            if status not in (429, 502, 503) or attempt == tries - 1:
+                raise
+            time.sleep(wait * (attempt + 1))
+
+
 def generate(payload: dict) -> str:
     """The explanation exactly as the product asks for it (same prompt, same payload, same limits)."""
-    return llm.chat(_SYSTEM_EXPLAIN, json.dumps(payload), max_tokens=100).strip().strip('"')
+    return _retrying(lambda: llm.chat(_SYSTEM_EXPLAIN, json.dumps(payload), max_tokens=100)).strip().strip('"')
 
 
 def judge_input(case: dict, payload: dict, explanation: Optional[str] = None) -> dict:
@@ -141,8 +157,8 @@ def judge_input(case: dict, payload: dict, explanation: Optional[str] = None) ->
 
 def judge(case: dict, payload: dict, explanation: str) -> tuple[dict, str]:
     """(scores, reason) from the judge model. Scores are {} when the reply is unusable."""
-    raw = llm.chat(JUDGE_SYSTEM, json.dumps(judge_input(case, payload, explanation)),
-                   max_tokens=300, model=os.environ.get("EVAL_JUDGE_MODEL", "").strip() or None)
+    raw = _retrying(lambda: llm.chat(JUDGE_SYSTEM, json.dumps(judge_input(case, payload, explanation)),
+                                     max_tokens=300, model=os.environ.get("EVAL_JUDGE_MODEL", "").strip() or None))
     return parse_judgment(raw)
 
 

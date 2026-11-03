@@ -35,8 +35,11 @@ You receive JSON: the verdict, the score, the rules that fired, the evidence, an
 what the engine says it is. If historical_evidence is present, cite it concretely
 (e.g. "seen 3 times before, previously CRITICAL"). If threat_intelligence is
 present, cite only its CVEs, source names, publication dates, IOC reputation, or
-advisory summaries. Never make a security claim beyond the supplied evidence. No
-JSON, no markdown, no preamble.\
+advisory summaries. Never make a security claim beyond the supplied evidence. Never
+name a company, product, service or cloud provider that is not written in the
+evidence (an IP address does not tell you who owns it). Prefer the most telling
+facts from the evidence (parent process, folder, listening address, port) over
+generic wording. No JSON, no markdown, no preamble.\
 """
 
 _SYSTEM_COPILOT = """\

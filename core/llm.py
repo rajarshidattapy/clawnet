@@ -53,8 +53,8 @@ PROVIDERS = ("openai", "anthropic", "gemini", "openrouter")
 _DEFAULTS = {
     "openai":     ("https://api.openai.com/v1", "gpt-5.4-mini", "OPENAI_API_KEY"),
     "anthropic":  ("https://api.anthropic.com/v1", "claude-haiku-5-5", "ANTHROPIC_API_KEY"),
-    # Gemini's OpenAI-compatible endpoint, so one request shape serves it too.
-    "gemini":     ("https://generativelanguage.googleapis.com/v1beta/openai", "gemini-2.5-flash",
+    # Gemini's native endpoint. It is more broadly available than its compatibility endpoint.
+    "gemini":     ("https://generativelanguage.googleapis.com/v1beta", "gemini-3.6-flash",
                    "GEMINI_API_KEY"),
     "openrouter": ("https://openrouter.ai/api/v1", "openai/gpt-5.4-mini", "OPENROUTER_API_KEY"),
 }
@@ -149,14 +149,27 @@ def _usage(data: dict) -> dict:
     u = data.get("usage") or {}
     count = lambda v: v if isinstance(v, int) and not isinstance(v, bool) else None      # noqa: E731
     cost = u.get("cost")
-    return {"input": count(u.get("prompt_tokens", u.get("input_tokens"))),
-            "output": count(u.get("completion_tokens", u.get("output_tokens"))),
+    return {"input": count(u.get("prompt_tokens", u.get("input_tokens", u.get("promptTokenCount")))),
+            "output": count(u.get("completion_tokens", u.get("output_tokens", u.get("candidatesTokenCount")))),
             "cost": float(cost) if isinstance(cost, (int, float)) and not isinstance(cost, bool) else None}
 
 
 def _complete(p: Provider, system: str, user: str, max_tokens: int,
               temperature: float, timeout: int) -> tuple[str, dict]:
     """(answer, usage) from one provider call."""
+    if p.name == "gemini":
+        resp = requests.post(
+            f"{p.base_url}/models/{p.model}:generateContent", timeout=timeout,
+            headers={"x-goog-api-key": p.api_key},
+            json={"systemInstruction": {"parts": [{"text": system}]},
+                  "contents": [{"role": "user", "parts": [{"text": user}]}],
+                  "generationConfig": {"maxOutputTokens": max_tokens, "temperature": temperature}})
+        resp.raise_for_status()
+        data = resp.json()
+        parts = (((data.get("candidates") or [{}])[0].get("content") or {}).get("parts") or [])
+        text = "".join(part.get("text", "") for part in parts)
+        return _THINK.sub("", text).strip(), _usage({"usage": data.get("usageMetadata") or {}})
+
     if p.name == "anthropic":
         resp = requests.post(
             p.base_url + "/messages", timeout=timeout,
@@ -180,6 +193,11 @@ def _complete(p: Provider, system: str, user: str, max_tokens: int,
         payload["reasoning_effort"] = _env("OPENAI_REASONING_EFFORT") or "none"
     else:
         payload["temperature"] = temperature
+    if p.name == "openrouter" and not (openai_style and _is_reasoning_model(p.model)) \
+            and _env("LLM_REASONING").lower() not in ("on", "yes", "1", "true"):
+        # ClawNet asks for one short sentence. A thinking model left on spends the whole token
+        # budget thinking and returns nothing. LLM_REASONING=on keeps it, for longer answers.
+        payload["reasoning"] = {"enabled": False}
     headers = {"Authorization": f"Bearer {p.api_key}"} if p.api_key else {}
     resp = requests.post(p.base_url + "/chat/completions", json=payload, headers=headers,
                          timeout=timeout)
