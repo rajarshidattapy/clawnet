@@ -13,7 +13,6 @@ dependencies = [
     "python-telegram-bot>=20.0",
     "send2trash>=1.8",
     "mcp>=1.10,<2",
-    "trueforge-sdk>=0.2",
     "daytona>=0.200",
 ]
 
@@ -24,6 +23,7 @@ memory = [
 
 [project.scripts]
 clawnet = "clawnet:main"
+clawforge = "clawforge.__main__:main"
 
 [tool.setuptools]
 py-modules = ["clawnet"]

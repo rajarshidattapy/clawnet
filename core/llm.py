@@ -1,8 +1,7 @@
 """LLM backend — OpenAI, Anthropic, Gemini, OpenRouter, or a local Ollama.
 
-The only place ClawNet talks to a language model. Both the network agent and the
-sandbox explainer go through `chat()`; the ClawForge harness reads `resolve()` to
-register the same provider in TrueForge. Configuration comes from the environment:
+The only place ClawNet talks to a language model. Both the network copilot and the
+sandbox explainer go through `chat()`. Configuration comes from the environment:
 
     OLLAMA=yes|no        yes = local model only (no cloud call, no cloud fallback)
     OLLAMA_BASE_URL      default http://localhost:11434

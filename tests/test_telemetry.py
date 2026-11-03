@@ -1,7 +1,6 @@
 """Tracing and metrics (core/telemetry.py), their capture points, and the /settings dashboard."""
 import json
 import time
-from types import SimpleNamespace
 
 import pytest
 import requests
@@ -10,7 +9,7 @@ from rich.console import Console
 import clawforge  # noqa: F401  (puts core/ on sys.path)
 import llm
 import telemetry
-from clawforge import harness, monitor
+from clawforge import monitor
 
 
 @pytest.fixture(autouse=True)
@@ -252,18 +251,6 @@ def test_trace_listing_and_lookup():
 
 # ── the agent's spans ─────────────────────────────────────────────────────────
 
-def test_agent_messages_become_generation_spans():
-    t0 = time.time()
-    msg = SimpleNamespace(type="model.message", model="openrouter/nvidia-nemotron-free", content="done", thread_id="main",
-                          tool_calls=[1, 2], usage=SimpleNamespace(input_tokens=900, output_tokens=40))
-    done = SimpleNamespace(type="turn.done")
-    with telemetry.span("agent.run", "agent", new_trace=True):
-        harness._record_generations([(t0, msg), (t0 + 2.0, done)])
-    s = next(r for r in spans() if r["name"] == "agent.llm")
-    assert (s["provider"], s["model"]) == ("openrouter", "nvidia-nemotron-free")
-    assert s["usage"]["total"] == 940 and s["ms"] == pytest.approx(2000, abs=5) and s["attrs"]["tool_calls"] == 2
-
-
 # ── the /settings dashboard ───────────────────────────────────────────────────
 
 def _render(renderable) -> str:
@@ -316,7 +303,8 @@ def test_settings_can_be_changed_but_only_the_safe_ones(tmp_path, monkeypatch):
     monkeypatch.setenv("TELEMETRY", "yes")
     monkeypatch.setenv("LLM_FAST_MODEL", "")
     monkeypatch.setenv("LLM_REASONING_MODEL", "")
-    assert "OLLAMA=yes" in monitor.set_setting("ollama", "YES", str(env)) and "/setup" in monitor.set_setting("OLLAMA", "yes", str(env))
+    assert "OLLAMA=yes" in monitor.set_setting("ollama", "YES", str(env))
+    assert "applied" in monitor.set_setting("OLLAMA", "yes", str(env))
     assert monitor.set_setting("TELEMETRY", "no", str(env)).startswith("[green]")
     lines = env.read_text(encoding="utf-8").splitlines()
     assert lines[:2] == ["OPENAI_API_KEY=sk-keep-me", "OLLAMA=yes"] and "OTHER=1" in lines and "TELEMETRY=no" in lines

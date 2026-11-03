@@ -51,7 +51,6 @@ SETTINGS = {         # key -> (what it is, validator). Only non-secret switches 
     "TELEMETRY": ("record traces and metrics", YES_NO),
     "TELEMETRY_CAPTURE_IO": ("store redacted prompts and answers in traces", YES_NO),
 }
-_NEEDS_SETUP = {"OLLAMA", "LLM_PROVIDER", "LLM_MODEL", "LLM_FAST_MODEL", "LLM_REASONING_MODEL", "OLLAMA_MODEL"}
 
 
 # ── formatting ────────────────────────────────────────────────────────────────
@@ -333,9 +332,7 @@ def set_setting(key: str, value: str, path: str = ENV_PATH) -> str:
     value = value.lower() if key in ("OLLAMA", "LLM_CACHE", "TELEMETRY", "TELEMETRY_CAPTURE_IO", "LLM_PROVIDER") else value
     write_env(key, value, path)
     os.environ[key] = value
-    note = ("\n[dim]The TrueForge agent still has the old model. Run /setup to switch it too.[/dim]"
-            if key in _NEEDS_SETUP else "")
-    return f"[green]{key}={value}[/green] saved to .env and applied.{note}"
+    return f"[green]{key}={value}[/green] saved to .env and applied."
 
 
 def settings(arg: str, records: Optional[list] = None):

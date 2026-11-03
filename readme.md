@@ -1,287 +1,143 @@
 # ClawForge
 
-### From terminal → agentic harness.
+### AI security harness for your machine.
 
-**ClawForge is an open-source harness for running, observing, and controlling agentic workloads on your machine.**
+ClawForge is a local terminal application for observing network activity, investigating suspicious processes, sandboxing code, and taking guarded security actions. It has no TrueForge dependency and does not require Node.js or a hosted orchestration service.
 
-![ClawForge Banner](docs/banner.png)
+It includes a native copilot, local human approvals, provider-agnostic model routing, telemetry, offline evaluation gates, and an optional localhost MCP server for compatible clients.
 
-It evolves from a security-focused terminal into a layer that an internal agentic system can operate through, powered by [TrueForge](https://github.com/truefoundry/trueforge).
+## What it does
 
----
-
-## The Problem
-
-Modern agents can **write and execute code**, but there is a missing layer between the agent and the machine.
-
-You need somewhere to:
-
-- Run untrusted or generated code safely.
-- See what processes that code starts.
-- See which ports and network connections it opens.
-- Understand what is actually happening on the machine.
-- Decide whether a process or connection is suspicious.
-- Let an agent investigate the system instead of blindly executing commands.
-- Stop before an action can cause real damage.
-
-Most existing tooling solves only one piece of this.
-
-You have terminals that execute commands, sandboxes that isolate code, and system monitors that show processes or connections — but there is no simple, open-source **agentic layer that brings these capabilities together**.
-
----
-
-## What is ClawForge?
-
-ClawForge provides that layer.
-
-```text
-                    ⚡ CLAWFORGE
-                  Agentic Harness
-                         │
-                  ┌──────▼──────┐
-                  │  TrueForge  │
-                  │             │
-                  │ Agents      │
-                  │ Sessions    │
-                  │ Subagents   │
-                  │ Approvals   │
-                  └──────┬──────┘
-                         │
-                  ┌──────▼──────┐
-                  │   ClawNet   │
-                  │             │
-                  │ Sandbox     │
-                  │ Processes   │
-                  │ Network     │
-                  │ Policy      │
-                  │ Actions     │
-                  └──────┬──────┘
-                         │
-                         ▼
-                      Machine
-```
-
-### ClawForge lets an agent:
-
-**Run**
-
-Execute code inside an isolated environment rather than directly on the host.
-
-**Observe**
-
-Inspect processes, ports, connections, filesystem activity, and execution behavior.
-
-**Reason**
-
-Ask questions such as:
-
-> *Which processes currently running on my machine look suspicious?*
-
-> *What opened this connection?*
-
-> *Which process is listening on this port?*
-
-> *What did this code actually do when executed?*
-
-**Control**
-
-Take actions through ClawNet's policy and security layer.
-
-**Stop**
-
-Pause before sensitive or irreversible actions and require human approval.
-
----
+- Observe processes, connections, listeners, evidence, and threat intelligence.
+- Explain deterministic security verdicts with an LLM without allowing the LLM to change them.
+- Run untrusted code in a Daytona sandbox, with Docker as a fallback.
+- Require a local human confirmation before any host-changing action.
+- Expose observe and sandbox operations to external MCP clients on localhost.
 
 ## Architecture
 
-ClawForge is not a separate agent platform sitting beside ClawNet.
-
-**ClawNet is becoming the harness.**
-
-TrueForge provides the agentic orchestration primitives, while ClawNet provides the machine-level capabilities and security boundaries.
-
-### Runtime, model routing, and safety boundaries
-
 ```mermaid
 flowchart TB
-    User["Operator"] --> Console["ClawForge console / TrueForge web UI"]
-    Console --> TF["TrueForge\nagent sessions, subagents, tool orchestration"]
+    User["Operator"] --> CLI["ClawForge local terminal"]
+    CLI --> Copilot["Native security copilot"]
+    CLI --> Approval["Local confirmation for host actions"]
+    CLI --> Settings["Settings and model routes"]
 
-    subgraph Host["Developer machine"]
+    subgraph Host["Local machine"]
         direction TB
-        TF -->|"localhost MCP + bearer token"| MCP["ClawNet MCP server"]
-        MCP --> Tools["Annotated capabilities"]
+        Observe["Observe\nprocesses, connections, listeners, evidence"] --> Policy["Deterministic policy engine\nverdict and recommended action"]
+        Policy --> Explain["Evidence-grounded explanation"]
+        Copilot --> Reasoning["Investigation and planning"]
 
-        Tools --> Observe["Observe\nconnections, processes, ports, evidence"]
-        Tools --> Execute["Execute\nsandbox_run_* only"]
-        Tools --> Control["Control\nkill, block, quarantine, close port"]
+        Explain -->|"fast route"| Router["Provider-agnostic model router"]
+        Reasoning -->|"reasoning route"| Router
+        Router --> Fast["LLM_FAST_MODEL\nshort, low-cost responses"]
+        Router --> Deep["LLM_REASONING_MODEL\ncopilot analysis"]
+        Fast --> Provider["Selected model provider"]
+        Deep --> Provider
 
-        Observe --> Policy["Deterministic policy engine\nverdict + action"]
-        Execute --> Sandbox["Daytona ephemeral sandbox\nDocker fallback"]
-        Control --> Approval["TrueForge human approval"]
-        Approval --> Guardrails["Local guardrails\nprotected targets, blast radius, chain of trust"]
-        Guardrails --> Machine["Host machine action"]
+        Approval --> Guardrails["Guardrails\nprotected targets, blast radius, schema"]
+        Guardrails --> Action["Host action\nkill, block, quarantine, close port"]
 
-        Policy --> Explain["Short explanation"]
-        Sandbox --> Explain
-        Console --> Copilot["Security copilot / agent task"]
-
-        Explain -->|"route: fast"| Router["Provider-agnostic model router\nLLM_FAST_MODEL / LLM_REASONING_MODEL"]
-        Copilot -->|"route: reasoning"| Router
-        TF -->|"reasoning model at setup"| Router
-
-        Router --> Fast["Fast model\nshort, low-cost explanations"]
-        Router --> Reasoning["Reasoning model\ndeep investigation and planning"]
-        Fast --> LLM["Selected provider"]
-        Reasoning --> LLM
-
-        Telemetry["Telemetry + LLM cache\ntraces, tokens, latency, cost"] -.-> Router
-        Tools -.-> Telemetry
+        Sandbox["Daytona sandbox\nDocker fallback"] --> Policy
+        Telemetry["Telemetry and LLM cache\ntraces, tokens, latency, cost"] -.-> Router
         Policy -.-> Decisions["Append-only decision log"]
     end
 
-    subgraph Providers["Model provider selected by LLM_PROVIDER"]
-        LLM --> OpenAI["OpenAI"]
-        LLM --> Anthropic["Anthropic"]
-        LLM --> Gemini["Gemini"]
-        LLM --> OpenRouter["OpenRouter"]
-        LLM --> Ollama["Local Ollama"]
-    end
+    Provider --> OpenAI["OpenAI"]
+    Provider --> Anthropic["Anthropic"]
+    Provider --> Gemini["Gemini"]
+    Provider --> OpenRouter["OpenRouter"]
+    Provider --> Ollama["Local Ollama"]
 
-    Observe <-->|"read-only enrichment"| Intel["Threat intel / Supermemory"]
+    MCP["Optional localhost MCP server"] --> Observe
+    MCP --> Sandbox
+    MCP -.->|"control refused: native approval required"| Approval
+    Intel["Threat intelligence / Supermemory"] <-->|"read-only enrichment"| Observe
 
-    subgraph CI["CI: deterministic and offline gates"]
-        Replay["Safety replay"] --> Quality["Quality cassette replay"]
-        Quality --> Gate["Ship / no-ship"]
+    subgraph CI["Offline CI gates"]
+        Replay["Safety replay"] --> Quality["Quality cassette replay"] --> Ship["Ship / no-ship"]
     end
     Policy -.-> Replay
     Explain -.-> Quality
 ```
 
-Model routes are selected explicitly by the workload, never by inspecting untrusted prompt text. The deterministic policy engine remains the source of truth for every security verdict and host action; a model can only explain or investigate within those boundaries.
-
-```text
-Agent
-  │
-  ▼
-TrueForge
-  │
-  ├── Sessions
-  ├── Subagents
-  ├── Tool orchestration
-  └── Approval checkpoints
-  │
-  ▼
-ClawNet
-  │
-  ├── Network monitoring
-  ├── Process inspection
-  ├── Sandbox execution
-  ├── Policy engine
-  ├── Behavioral analysis
-  └── Security actions
-  │
-  ▼
-Machine
-```
-
-The agent **does not directly control the machine**.
-
----
+The model never determines a security verdict or bypasses a guardrail. The deterministic policy engine decides; the model only explains or investigates within that boundary.
 
 ## Quickstart
 
-Requires Windows, Python 3.10+, Node 22.14+, an OpenAI API key, and a sandbox: a **Daytona** API key (primary, `DAYTONA_API_KEY`) and/or Docker Desktop (fallback).
+Requires Windows, Python 3.10+, an LLM API key or local Ollama, and a sandbox: Daytona (`DAYTONA_API_KEY`) and/or Docker Desktop.
 
-**One command:** `.\start.ps1` (or `start.cmd`). It creates the venv if missing, opens TrueForge and the MCP server in their own terminal tabs, waits until both answer, registers the agent, then opens the console in the current terminal. Servers already running are reused, and an MCP server with stale code is restarted. Flags: `-Supermemory` (also start Supermemory Local in WSL), `-ServersOnly`, `-Restart`, `-NewWindows`, `-SkipSetup`.
-
-Or by hand:
-
-```bash
-python -m venv .venv && .venv\Scripts\activate
+```powershell
+python -m venv .venv
+.venv\Scripts\activate
 pip install -r core/requirements.txt
-copy .env.example .env                       # set OPENAI_API_KEY
+copy .env.example .env
 
-# terminal 1 — the agent harness (installs TrueForge into .trueforge/ on first run)
-python -m clawforge trueforge                # http://localhost:8790
-
-# terminal 2 — ClawNet's capabilities as MCP tools
-python -m clawforge serve                    # http://127.0.0.1:8765/mcp (bearer token)
-
-# terminal 3 — the ClawForge console: status checks, first-run setup, then chat with the agent
+# Start the standalone local copilot.
 python -m clawforge
 ```
 
-`python -m clawforge trueforge` is used instead of `npx @truefoundry/trueforge`. On Windows, npm 11's `npx` install lock times out on a package this size (`npm error code ECOMPROMISED` / `Lock compromised`). The command also allowlists the local MCP host (`OUTBOUND_URL_ALLOWED_HOSTS`), because TrueForge blocks loopback MCP URLs by default.
+Or use the launcher:
 
-One-shot mode: `python -m clawforge run "Which processes look suspicious? Contain anything that is."`
-
-You can also open the TrueForge chat UI, pick the `clawforge` agent, and approve with **Allow / Deny** there. `clawnet forge <cmd>` works the same way as `python -m clawforge <cmd>`.
-
-## Where it stops
-
-Each ClawNet capability is an MCP tool. The approval line is set by the tool's MCP annotations, which TrueForge enforces:
-
-| Tier | Tools | Gate |
-|---|---|---|
-| **Observe** (read-only) | `system_status`, `list_connections`, `suspicious_processes`, `inspect_process`, `who_is_listening`, `explain_pid`, `lookup_evidence`, `threat_intel`, `recent_decisions`, `preview_action`, `list_sandbox_runs`, `sandbox_report` | runs autonomously |
-| **Execute** (Daytona sandbox, Docker fallback) | `sandbox_run_code`, `sandbox_run_path`, `sandbox_clone` | runs autonomously in an ephemeral Daytona sandbox (local Docker if Daytona is unavailable): quarantined copy only, decoy credentials, canary secrets, host env never forwarded |
-| **Control** (changes the host) | `kill_process`, `suspend_process`, `block_ip`, `quarantine_file`, `close_port`, `promote_sandbox_run` | **human approval on every call** |
-
-The gate has several layers:
-
-1. Control tools are annotated `destructiveHint` **and** named explicitly in `require_approval_for_tools`.
-2. Before a control action is proposed, `preview_action` measures its guardrail result and blast radius. The CLI shows that briefing again at the approval prompt, re-measured locally rather than taken from the agent's word.
-3. After a human approves, ClawNet's guardrails still run and can refuse: protected processes, private IPs, System32 files, or a failed chain-of-trust step.
-4. The MCP server only listens on localhost and requires a bearer token, so only the registered TrueForge connector can reach it.
-5. Every verdict, approval, refusal and action is appended to `~/.clawnet/decisions.jsonl`.
-
-Machine-sourced strings (process names, paths, sandbox output) go through ClawNet's prompt-injection scrubber before they reach the model.
-
-- [TrueForge](https://github.com/truefoundry/trueforge)
-- [ClawNet](https://github.com/rajarshidattapy/clawnet)
-
----
-
-## The Idea
-
-```text
-Traditional
-
-Terminal → Machine
-
-
-ClawForge
-
-Agent
-  ↓
-Harness
-  ↓
-Observe → Execute → Analyze → Control
-  ↓
-Machine
+```powershell
+.\start.ps1
 ```
 
-> **The agent reasons.  
-> TrueForge orchestrates.  
-> ClawNet observes and enforces.  
-> The machine executes.**
+Start the optional local MCP server only when another MCP client needs ClawForge tools:
 
-## Files
+```powershell
+python -m clawforge serve
+```
 
-1) core/              -> core logic (policy engine, sandbox, monitor, memory, LLM via OpenAI)
-2) clawforge/         -> the harness layer
-   - capabilities.py  -> ClawNet primitives as JSON-returning functions (observe / execute / control)
-   - mcp_server.py    -> those functions as annotated MCP tools, with bearer auth
-   - harness.py       -> TrueForge setup, the harness-owned state machine, approval briefings
-   - __main__.py      -> `python -m clawforge serve | setup | run | chat | tools`
-3) scripts/           -> scripts to run for setup
-4) tests/             -> feature tests (`test_clawforge.py` covers where the harness stops)
-5) docs/clawnet_docs/ -> old security terminal
-6) docs/new_arch.md   -> the architecture this implements
-7) docs/hackdetails.md -> details about the hackathon
-8) docs/trueforge_integration.md -> reference integration example
+## Model routing
 
+Choose one provider and two model IDs. The names are provider-specific, so this works with OpenAI, Anthropic, Gemini, OpenRouter, or Ollama.
 
-Built for the **TrueFoundry TrueForge Hackathon**.
+```powershell
+python -m clawforge settings set LLM_PROVIDER gemini
+python -m clawforge settings route fast gemini-3.6-flash
+python -m clawforge settings route reasoning your-larger-reasoning-model
+```
+
+`fast` is used for short connection and sandbox explanations. `reasoning` is used by the local security copilot. Settings are saved to `.env`; API keys are intentionally not accepted through the settings UI.
+
+## Safety model
+
+| Tier | Capability | Gate |
+|---|---|---|
+| Observe | process, connection, evidence, and threat-intel inspection | read-only |
+| Execute | sandbox code, paths, and repositories | isolated Daytona or Docker environment |
+| Control | kill, suspend, block, quarantine, close port, promote sandbox result | native local confirmation and guardrails |
+
+Run a control action through the native terminal:
+
+```powershell
+python -m clawforge action kill_process 1234 "Critical outbound beaconing from a Temp binary"
+```
+
+The command displays the exact action, target, and reason before asking for confirmation. Guardrails then run again and may still refuse protected processes, private IPs, system files, or failed chain-of-trust checks.
+
+The optional MCP server remains localhost-only and bearer-authenticated. It supports observe and sandbox tools; it refuses control calls because remote clients cannot bypass the native local approval boundary.
+
+## Commands
+
+| Command | Purpose |
+|---|---|
+| `python -m clawforge` | open the local copilot |
+| `python -m clawforge status` | print local machine and sandbox status |
+| `python -m clawforge settings` | show model, routing, telemetry, and cache settings |
+| `python -m clawforge settings route fast MODEL` | set the small/fast model |
+| `python -m clawforge settings route reasoning MODEL` | set the deeper analysis model |
+| `python -m clawforge serve` | start the optional localhost MCP server |
+| `python -m clawforge tools` | list exposed MCP tools and tiers |
+| `python -m clawforge action ...` | propose and locally approve a host-changing action |
+
+## Repository layout
+
+- `core/` — policy engine, monitor, sandbox, guardrails, LLM adapter, quality gates.
+- `clawforge/` — standalone terminal commands, settings dashboard, capabilities, optional MCP server, and RBAC.
+- `tests/` — deterministic policy, guardrail, LLM, RBAC, telemetry, and quality tests.
+- `scripts/` — local launcher and optional service scripts.
+
+ClawForge is a self-contained security harness: the terminal owns the copilot, approvals, settings, and routing; ClawNet provides the deterministic security controls underneath.

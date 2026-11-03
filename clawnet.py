@@ -19,7 +19,7 @@ def main() -> None:
         return
 
     if args[0] == "forge":
-        # ClawForge: ClawNet as an agentic harness on TrueForge (see clawforge/).
+        # ClawForge: standalone local harness (see clawforge/).
         sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
         from clawforge.__main__ import main as forge_main
         sys.exit(forge_main(args[1:]))

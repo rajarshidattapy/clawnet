@@ -261,45 +261,51 @@ def sandbox_clone(git_url: str, command: str = "", network: bool = True) -> dict
 
 # ── CONTROL (human approval required) ─────────────────────────────────────────
 
+def _native_approval_required(action: str) -> dict:
+    """MCP clients cannot bypass the local operator approval boundary."""
+    return {"action": action, "ok": False, "refused": "native_approval_required",
+            "detail": "Run `clawforge action ...` locally to review and approve this host-changing action."}
+
+
 @tool(title="Kill process", annotations=CONTROL)
 def kill_process(pid: int, reason: str) -> dict:
     """Terminate a process. IRREVERSIBLE. Requires human approval. Refused for
     protected system processes. `reason` must state the evidence and consequence."""
-    return cap.kill_process(pid, reason)
+    return _native_approval_required("kill_process")
 
 
 @tool(title="Suspend process", annotations=CONTROL)
 def suspend_process(pid: int, reason: str) -> dict:
     """Freeze a process (can be resumed later). Requires human approval."""
-    return cap.suspend_process(pid, reason)
+    return _native_approval_required("suspend_process")
 
 
 @tool(title="Block IP", annotations=CONTROL)
 def block_ip(ip: str, reason: str) -> dict:
     """Add an outbound Windows Firewall block rule for a public IP. Requires human
     approval. Refused for private/local IPs."""
-    return cap.block_ip(ip, reason)
+    return _native_approval_required("block_ip")
 
 
 @tool(title="Quarantine file", annotations=CONTROL)
 def quarantine_file(path: str, reason: str) -> dict:
     """Move a file from a drop zone (Temp, Downloads, Desktop, …) to the Recycle Bin.
     Requires human approval. Refused for system files."""
-    return cap.quarantine_file(path, reason)
+    return _native_approval_required("quarantine_file")
 
 
 @tool(title="Close port", annotations=CONTROL)
 def close_port(port: int, reason: str) -> dict:
     """Kill every process bound to a local port. IRREVERSIBLE. Requires human
     approval; each kill is still guardrailed."""
-    return cap.close_port(port, reason)
+    return _native_approval_required("close_port")
 
 
 @tool(title="Promote sandbox run", annotations=CONTROL)
 def promote_sandbox_run(run_id: str, reason: str) -> dict:
     """Copy a vetted, quarantined sandbox snapshot to the host workspace. Requires
     human approval, and a failed blocking chain-of-trust step refuses it anyway."""
-    return cap.promote_sandbox_run(run_id, reason)
+    return _native_approval_required("promote_sandbox_run")
 
 
 EXECUTE_TOOLS = ("sandbox_run_code", "sandbox_run_path", "sandbox_clone")

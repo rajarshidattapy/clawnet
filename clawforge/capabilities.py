@@ -509,7 +509,7 @@ def _act(action: str, reason: str, fn, **target) -> dict:
         return refused
     ok, detail = fn()
     policy.log_decision("action", action=action, ok=ok, detail=detail,
-                        approved_by="trueforge", agent_reason=guardrails.redact(_s(reason, 300)), **target)
+                        approved_by="local-console", agent_reason=guardrails.redact(_s(reason, 300)), **target)
     return {"action": action, "ok": ok, "detail": detail, **target}
 
 
@@ -550,8 +550,8 @@ def promote_sandbox_run(run_id: str, reason: str) -> dict:
     result = runner.result_for_run(run_id)
     if result is None:
         return {"action": "promote_sandbox_run", "ok": False, "detail": f"unknown run_id {run_id}"}
-    out = runner.promote_approved(result, approved_by="trueforge")
+    out = runner.promote_approved(result, approved_by="local-console")
     policy.log_decision("action", action="promote_sandbox_run", run_id=run_id,
-                        ok=out.get("promoted", False), approved_by="trueforge",
+                        ok=out.get("promoted", False), approved_by="local-console",
                         agent_reason=guardrails.redact(_s(reason, 300)))
     return {"action": "promote_sandbox_run", "run_id": run_id, "ok": out.get("promoted", False), **out}

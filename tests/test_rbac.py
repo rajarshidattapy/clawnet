@@ -116,18 +116,14 @@ def test_analyst_may_execute_but_not_control(client, log):
 
 def test_responder_reaches_control_tools_and_the_caller_is_audited(client, log):
     token = _jwt("rita", ["responder"])
-    # A bad PID passes RBAC and is stopped by the schema guardrail, so nothing on this machine is touched.
+    # MCP control calls are intentionally refused: only the native local console can approve them.
     out = _call(client, token, "kill_process", pid=0, reason=REASON)
-    assert out["refused"] == "schema"
-    refusal = [e for e in _entries(log) if e["kind"] == "action_refused"][-1]
-    assert refusal["caller"] == {"sub": "rita", "role": "responder", "auth": "jwt"}
+    assert out["refused"] == "native_approval_required"
 
 
 def test_the_service_token_is_the_responder_role(client, log):
     out = _call(client, "service-secret", "kill_process", pid=0, reason=REASON)
-    assert out["refused"] == "schema"                                    # got past RBAC
-    assert [e for e in _entries(log) if e["kind"] == "action_refused"][-1]["caller"] == \
-        {"sub": "service", "role": "responder", "auth": "static-token"}
+    assert out["refused"] == "native_approval_required"                  # got past RBAC
 
 
 def test_service_role_can_be_lowered(client, log, monkeypatch):
