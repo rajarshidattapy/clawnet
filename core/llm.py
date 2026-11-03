@@ -23,6 +23,7 @@ If the chosen cloud provider fails and OPENROUTER_API_KEY is set, the call is re
 on OpenRouter. With OLLAMA=yes nothing leaves the machine.
 
 Everything the model returns passes through guardrails.redact (secrets and PII).
+Answers are cached on disk by prompt hash (llm_cache.py; LLM_CACHE=no turns it off).
 
 Plain HTTP via `requests` — no vendor SDKs needed.
 """
@@ -36,8 +37,10 @@ from typing import Optional
 import requests
 
 try:
+    import llm_cache
     from guardrails import redact
 except ImportError:
+    from core import llm_cache  # type: ignore
     from core.guardrails import redact  # type: ignore
 
 PROVIDERS = ("openai", "anthropic", "gemini", "openrouter")
@@ -179,7 +182,17 @@ def chat(system: str, user: str, *, max_tokens: int = 200,
     missing or the call fails, retries on OpenRouter when that is configured (never in
     OLLAMA mode). Raises when nothing worked so callers can fall back to the rule summary.
     """
-    return redact(_chat(system, user, max_tokens, temperature, timeout))
+    # Only deterministic calls are cached: at temperature 0 the same prompt means the same answer.
+    cacheable = llm_cache.enabled() and temperature == 0
+    if cacheable:
+        p = resolve()
+        k = llm_cache.key(p.name, p.model, system, user, max_tokens, temperature)
+        if (hit := llm_cache.get(k)) is not None:
+            return hit
+    text = redact(_chat(system, user, max_tokens, temperature, timeout))
+    if cacheable:
+        llm_cache.put(k, text)      # the redacted answer, never the raw one
+    return text
 
 
 def _chat(system: str, user: str, max_tokens: int, temperature: float, timeout: int) -> str:
