@@ -32,6 +32,7 @@ from typing import Any, Optional
 
 from clawforge import CORE_DIR
 
+import guardrails
 import policy
 import psutil
 
@@ -489,12 +490,26 @@ def sandbox_report(run_id: str) -> dict:
 
 # ── CONTROL (human-approved in TrueForge, re-checked here) ────────────────────
 
+def _refuse_invalid(action: str, reason: str, **args) -> Optional[dict]:
+    """The output guardrail: the proposal must fit the action's JSON Schema before anything runs,
+    whatever a human approved. Returns the refusal, or None when the proposal is well-formed."""
+    errors = guardrails.validate_action(action, {**args, "reason": reason})
+    if not errors:
+        return None
+    policy.log_decision("action_refused", action=action, guardrail="schema", errors=errors,
+                        agent_reason=guardrails.redact(_s(reason, 300)))
+    return {"action": action, "ok": False, "refused": "schema", "errors": errors,
+            "detail": "Proposal rejected before execution: " + "; ".join(errors)}
+
+
 def _act(action: str, reason: str, fn, **target) -> dict:
     """Run an approved action. Guardrails still apply after approval, and every
     outcome lands in the immutable decision log."""
+    if (refused := _refuse_invalid(action, reason, **target)) is not None:
+        return refused
     ok, detail = fn()
     policy.log_decision("action", action=action, ok=ok, detail=detail,
-                        approved_by="trueforge", agent_reason=_s(reason, 300), **target)
+                        approved_by="trueforge", agent_reason=guardrails.redact(_s(reason, 300)), **target)
     return {"action": action, "ok": ok, "detail": detail, **target}
 
 
@@ -530,11 +545,13 @@ def close_port(port: int, reason: str) -> dict:
 
 def promote_sandbox_run(run_id: str, reason: str) -> dict:
     runner = _runner()
+    if (refused := _refuse_invalid("promote_sandbox_run", reason, run_id=run_id)) is not None:
+        return refused
     result = runner.result_for_run(run_id)
     if result is None:
         return {"action": "promote_sandbox_run", "ok": False, "detail": f"unknown run_id {run_id}"}
     out = runner.promote_approved(result, approved_by="trueforge")
     policy.log_decision("action", action="promote_sandbox_run", run_id=run_id,
                         ok=out.get("promoted", False), approved_by="trueforge",
-                        agent_reason=_s(reason, 300))
+                        agent_reason=guardrails.redact(_s(reason, 300)))
     return {"action": "promote_sandbox_run", "run_id": run_id, "ok": out.get("promoted", False), **out}

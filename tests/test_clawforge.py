@@ -66,9 +66,10 @@ def test_agent_spec_validates_against_trueforge_sdk():
 
 def test_guardrails_still_refuse_after_approval(temp_decision_log):
     # An approved call reaches ClawNet, and ClawNet still says no.
-    assert cap.kill_process(4, "approved in test")["ok"] is False
-    assert cap.block_ip("192.168.1.1", "approved in test")["ok"] is False
-    assert cap.quarantine_file(r"C:\Windows\System32\notepad.exe", "approved in test")["ok"] is False
+    why = "Approved in test: exercising the guardrail after approval."
+    assert cap.kill_process(4, why)["ok"] is False
+    assert cap.block_ip("192.168.1.1", why)["ok"] is False
+    assert cap.quarantine_file(r"C:\Windows\System32\notepad.exe", why)["ok"] is False
     kinds = [json.loads(l)["kind"] for l in temp_decision_log.read_text().splitlines()]
     assert kinds.count("refused") == 3 and kinds.count("action") == 3
 

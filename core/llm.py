@@ -22,6 +22,8 @@ register the same provider in TrueForge. Configuration comes from the environmen
 If the chosen cloud provider fails and OPENROUTER_API_KEY is set, the call is retried
 on OpenRouter. With OLLAMA=yes nothing leaves the machine.
 
+Everything the model returns passes through guardrails.redact (secrets and PII).
+
 Plain HTTP via `requests` — no vendor SDKs needed.
 """
 from __future__ import annotations
@@ -32,6 +34,11 @@ from dataclasses import dataclass
 from typing import Optional
 
 import requests
+
+try:
+    from guardrails import redact
+except ImportError:
+    from core.guardrails import redact  # type: ignore
 
 PROVIDERS = ("openai", "anthropic", "gemini", "openrouter")
 
@@ -165,13 +172,17 @@ def _complete(p: Provider, system: str, user: str, max_tokens: int,
 
 def chat(system: str, user: str, *, max_tokens: int = 200,
          temperature: float = 0.0, timeout: int = 60) -> str:
-    """One-shot chat completion. Returns the model's text answer.
+    """One-shot chat completion. Returns the model's text answer, redacted of secrets and PII.
 
     temperature defaults to 0 — ClawNet wants the explanation to be as stable as
     the deterministic verdict it narrates. Tries the chosen provider first; if its key is
     missing or the call fails, retries on OpenRouter when that is configured (never in
     OLLAMA mode). Raises when nothing worked so callers can fall back to the rule summary.
     """
+    return redact(_chat(system, user, max_tokens, temperature, timeout))
+
+
+def _chat(system: str, user: str, max_tokens: int, temperature: float, timeout: int) -> str:
     primary, backup = resolve(), fallback()
     if not primary.local and not primary.api_key and backup is None:
         raise RuntimeError(f"no API key for LLM_PROVIDER={primary.name} (set LLM_API_KEY)")

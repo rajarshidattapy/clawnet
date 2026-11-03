@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 from typing import Any, Optional
 
 import clawforge  # noqa: F401  (puts core/ on sys.path)
+import guardrails
 import llm
 from clawforge.mcp_server import CONTROL_TOOLS, EXECUTE_TOOLS, token as mcp_token, url as mcp_url
 
@@ -320,8 +321,8 @@ def _render_briefing(tool: str, args: dict, brief: dict) -> None:
     t.add_row("[bold]action[/bold]", f"[bold yellow]{tool}[/bold yellow]")
     for k, v in args.items():
         if k != "reason":
-            t.add_row(k, str(v))
-    t.add_row("agent's reason", str(args.get("reason", "—")))
+            t.add_row(k, guardrails.redact(str(v)))
+    t.add_row("agent's reason", guardrails.redact(str(args.get("reason", "—"))))
     t.add_row("guardrail", str(brief.get("guardrail", brief.get("error", "?"))))
     t.add_row("irreversible", "YES" if brief.get("irreversible") else "no")
     target = brief.get("target") or {}
@@ -352,13 +353,21 @@ def ask_human(tool: str, args: dict, decide=None) -> tuple[bool, str]:
     dashboard) collect the answer; the default asks on the terminal.
     """
     import policy
+    errors = guardrails.validate_action(tool, args)
+    if errors:      # a malformed proposal never reaches the human, and never runs
+        why = "proposal failed schema validation: " + "; ".join(errors)
+        console.print(Panel("\n".join(errors), title=f"[bold red]REJECTED: {tool} proposal is malformed[/bold red]",
+                            border_style="red"))
+        policy.log_decision("harness_approval", tool=tool, approved=False, reason=guardrails.redact(why),
+                            approved_by="schema-guardrail")
+        return False, why
     brief = briefing(tool, args)
     _render_briefing(tool, args, brief)
     if brief.get("guardrail") not in ("allowed", "per-process (see blast_radius)"):
         console.print("[red]ClawNet's guardrail will refuse this action even if you approve it.[/red]")
     approved, reason = (decide or _prompt_decision)(tool, args, brief)
     policy.log_decision("harness_approval", tool=tool, args={k: v for k, v in args.items() if k != "reason"},
-                        approved=approved, reason=reason, approved_by="clawforge-cli")
+                        approved=approved, reason=guardrails.redact(reason), approved_by="clawforge-cli")
     return approved, reason
 
 
@@ -405,6 +414,7 @@ def _stream(c, session_id: str, turn_input: list, hs: HarnessState) -> tuple[lis
     final = None
     printed_main = False
     announced: set = set()
+    redactor = guardrails.StreamRedactor()     # secrets/PII never reach the screen
     stream = c.sessions.create_turn_stream(session_id=session_id, input=turn_input)
     for event in stream:
         if is_event_delta(event):
@@ -412,7 +422,7 @@ def _stream(c, session_id: str, turn_input: list, hs: HarnessState) -> tuple[lis
             if base is not None:
                 merge_event_delta(base, event)
             if event.thread_id == "main" and getattr(event, "content", None):
-                console.print(event.content, end="", markup=False, highlight=False)
+                console.print(redactor.feed(event.content), end="", markup=False, highlight=False)
                 printed_main = True
             continue
         events[event.id] = event
@@ -423,7 +433,7 @@ def _stream(c, session_id: str, turn_input: list, hs: HarnessState) -> tuple[lis
         if et == "thread.created":
             console.print(f"\n[magenta]↳ subagent[/magenta] {getattr(event, 'title', '')}")
         elif et == "model.message" and event.thread_id == "main" and printed_main:
-            console.print("\n")
+            console.print(redactor.flush() + "\n", markup=False, highlight=False)
             printed_main = False
         elif et == "tool.response":
             if hs.state in ("OBSERVING", "EXECUTING", "APPROVED", "STOP"):
@@ -445,7 +455,7 @@ def _stream(c, session_id: str, turn_input: list, hs: HarnessState) -> tuple[lis
         elif et == "turn.done":
             final = event.state
     if printed_main:
-        console.print()
+        console.print(redactor.flush(), markup=False, highlight=False)
     return approvals, questions, final
 
 
