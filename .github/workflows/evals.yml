@@ -1,0 +1,42 @@
+name: evals
+
+# Two evals run together on every push and pull request:
+#   safety   core/replay.py   the model cannot move a verdict or defeat a guardrail (offline, $0)
+#   quality  core/quality.py  the explanations are faithful, grounded and clear, per an LLM judge
+#                             on the golden set (offline replay of a recording, $0)
+# The quality gate fails if its recording is stale, i.e. the explain prompt, the payload, the
+# judge or the golden set changed without re-recording (`python core/quality.py record`).
+# If the repo has an LLM_API_KEY secret, a third step also judges the live model.
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  evals:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    env:
+      LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+      LLM_PROVIDER: ${{ vars.LLM_PROVIDER }}
+      EVAL_JUDGE_MODEL: ${{ vars.EVAL_JUDGE_MODEL }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: core/requirements.txt
+      - run: python -m pip install -r core/requirements.txt pytest
+
+      - name: Safety replay
+        run: python core/replay.py score
+      - name: Quality evals (golden set, offline)
+        run: python core/quality.py score
+      - name: Eval tests
+        run: python -m pytest -q tests/test_policy.py tests/test_quality.py tests/test_guardrails.py tests/test_llm.py tests/test_rbac.py
+
+      - name: Quality evals (live model + LLM judge)
+        if: ${{ env.LLM_API_KEY != '' }}
+        run: python core/quality.py score --live

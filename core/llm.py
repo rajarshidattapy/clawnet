@@ -31,7 +31,7 @@ from __future__ import annotations
 
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Optional
 
 import requests
@@ -174,8 +174,11 @@ def _complete(p: Provider, system: str, user: str, max_tokens: int,
 
 
 def chat(system: str, user: str, *, max_tokens: int = 200,
-         temperature: float = 0.0, timeout: int = 60) -> str:
+         temperature: float = 0.0, timeout: int = 60, model: Optional[str] = None) -> str:
     """One-shot chat completion. Returns the model's text answer, redacted of secrets and PII.
+
+    `model` overrides the model id on the chosen provider (the quality eval uses it to judge
+    with a different model than the one being judged).
 
     temperature defaults to 0 — ClawNet wants the explanation to be as stable as
     the deterministic verdict it narrates. Tries the chosen provider first; if its key is
@@ -183,20 +186,21 @@ def chat(system: str, user: str, *, max_tokens: int = 200,
     OLLAMA mode). Raises when nothing worked so callers can fall back to the rule summary.
     """
     # Only deterministic calls are cached: at temperature 0 the same prompt means the same answer.
+    primary = replace(resolve(), model=model) if model else resolve()
     cacheable = llm_cache.enabled() and temperature == 0
     if cacheable:
-        p = resolve()
-        k = llm_cache.key(p.name, p.model, system, user, max_tokens, temperature)
+        k = llm_cache.key(primary.name, primary.model, system, user, max_tokens, temperature)
         if (hit := llm_cache.get(k)) is not None:
             return hit
-    text = redact(_chat(system, user, max_tokens, temperature, timeout))
+    text = redact(_chat(primary, system, user, max_tokens, temperature, timeout))
     if cacheable:
         llm_cache.put(k, text)      # the redacted answer, never the raw one
     return text
 
 
-def _chat(system: str, user: str, max_tokens: int, temperature: float, timeout: int) -> str:
-    primary, backup = resolve(), fallback()
+def _chat(primary: Provider, system: str, user: str, max_tokens: int, temperature: float,
+          timeout: int) -> str:
+    backup = fallback()
     if not primary.local and not primary.api_key and backup is None:
         raise RuntimeError(f"no API key for LLM_PROVIDER={primary.name} (set LLM_API_KEY)")
     error: Optional[Exception] = None

@@ -143,6 +143,7 @@ An unknown action name is also rejected.
 
 - Every verdict, approval, refusal and action is appended to `~/.clawnet/decisions.jsonl`. Schema refusals are logged as `action_refused` with the errors.
 - `core/replay.py` replays recorded sessions and checks decision determinism, injection resistance, guardrail safety (no recommended action a guardrail would refuse) and explanation faithfulness. `tests/test_policy.py` runs it in CI.
+- `core/quality.py` grades explanation *quality*, which the safety replay does not: a golden set (`tests/golden/explanations.json`) scored by an LLM judge on faithfulness, grounding and clarity, plus deterministic checks. `.github/workflows/evals.yml` runs it next to the safety replay.
 - `tests/test_guardrails.py` covers the new layers: redaction of each secret and PII kind, that evidence is not redacted, a secret split across chunks, well-formed and malformed actions for every tool, and that the server refuses a bad proposal without running it.
 
 ### 2.7 What is not covered
