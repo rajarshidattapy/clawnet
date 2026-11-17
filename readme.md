@@ -68,17 +68,17 @@ The model never determines a security verdict or bypasses a guardrail. The deter
 
 ## Quickstart
 
-Requires Windows, Python 3.10+, an LLM API key or local Ollama, and a sandbox: Daytona (`DAYTONA_API_KEY`) and/or Docker Desktop.
+Requires Windows and Python 3.10+. Without configuration, ClawForge starts in local mode, where you can check system status and list tools. AI chat requires an LLM API key or local Ollama; sandbox operations require Daytona or Docker Desktop.
 
 ```powershell
 python -m venv .venv
 .venv\Scripts\activate
 pip install -r core/requirements.txt
-copy .env.example .env
-
 # Start the standalone local copilot.
 python -m clawforge
 ```
+
+An `.env` file is optional. To configure AI or other integrations, copy `.env.example` to `.env` and supply the settings you need. A hosted AI service and installer are not included yet.
 
 Or use the launcher:
 

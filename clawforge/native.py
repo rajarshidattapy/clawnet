@@ -29,6 +29,27 @@ def console() -> None:
     from clawforge import capabilities
     import llm
 
+    if not llm.available():
+        console_out.print("[bold bright_cyan]ClawForge[/] is ready in local mode.")
+        console_out.print("AI chat is not configured yet. Local status and tools are available.")
+        console_out.print("Type status, tools, help, or exit.")
+        while True:
+            try:
+                command = input("ClawForge> ").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                console_out.print()
+                return
+            if command in ("exit", "quit", "q"):
+                return
+            if command == "status":
+                status()
+            elif command == "tools":
+                tools()
+            elif command in ("help", "?"):
+                console_out.print("status: show system status; tools: list available tools; exit: quit")
+            elif command:
+                console_out.print("AI chat is not configured yet. Type help for local commands.")
+        return
     provider = llm.routed("reasoning")
     console_out.print(f"[bold bright_cyan]ClawForge local copilot[/]  [dim]{provider.name}/{provider.model}[/]")
     console_out.print("[dim]Host-changing actions use `clawforge action ...` and require local confirmation.[/]")
